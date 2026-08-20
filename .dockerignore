@@ -1,0 +1,25 @@
+# 数据目录（通过卷挂载，不打包进镜像）
+session_data/
+chroma_db/
+
+# 环境与密钥（.env 通过 compose 注入，绝不进镜像）
+.env
+.env.*
+
+# Python 缓存与虚拟环境
+__pycache__/
+**/__pycache__/
+.venv/
+venv/
+
+# 教程/历史脚本（仅 06.py 与 modules/ 是应用所需）
+01.*.py
+02.*.py
+03.*.py
+04.*.py
+05..py
+
+# 其它
+.git/
+.gitignore
+*.md

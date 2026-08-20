@@ -1,0 +1,76 @@
+# ====================== 马氏AI会话智能体：一键部署编排 ======================
+# 用法：
+#   1. cp .env.example .env 并填入 API 密钥
+#   2. docker-compose up -d          （一条命令启动全部服务）
+#   3. 浏览器访问 http://localhost:8501
+#
+# 服务说明：
+#   app     - Streamlit 应用（端口 8501）
+#   redis   - 回答缓存（数据持久化到 redis_data 卷）
+#   chromadb- 向量数据库服务（数据持久化到宿主机 ./chroma_db，与本地开发共用）
+
+services:
+  # ---------- 应用主服务 ----------
+  app:
+    build: .
+    image: ma-ai-chat:latest
+    container_name: ma-ai-chat-app
+    ports:
+      - "${PORT:-8501}:8501"
+    environment:
+      # 服务间通信地址（固定为服务名，勿改）
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CHROMA_HOST: chromadb        # 设置后 rag_module 自动切换为服务器模式
+      CHROMA_PORT: "8000"
+      TZ: Asia/Shanghai
+      # 以下从 .env 文件读取（未设置时留空，界面内也可填写）
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-auto}"
+      CACHE_TTL: "${CACHE_TTL:-3600}"
+    volumes:
+      # 会话数据挂载到宿主机，重启容器不丢失
+      - ./session_data:/app/session_data
+    depends_on:
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    restart: unless-stopped
+
+  # ---------- Redis 缓存服务 ----------
+  redis:
+    image: redis:7-alpine
+    container_name: ma-ai-chat-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      # AOF 持久化卷：Redis 重启后缓存数据不丢失
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------- ChromaDB 向量数据库服务 ----------
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: ma-ai-chat-chromadb
+    ports:
+      - "${CHROMA_PORT:-8000}:8000"
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    volumes:
+      # 向量数据挂载到宿主机 ./chroma_db，重启不丢失（与本地开发共用同一目录）
+      - ./chroma_db:/chroma/chroma
+    restart: unless-stopped
+
+volumes:
+  redis_data:
