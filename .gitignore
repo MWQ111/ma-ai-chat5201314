@@ -21,3 +21,4 @@ logs/
 .coverage
 htmlcov/
 .streamlit/secrets.toml
+chroma_db/
