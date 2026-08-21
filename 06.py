@@ -3,9 +3,8 @@ import os
 import re
 import time
 import json
-import uuid
 import logging
-from typing import Any, List, Optional, Tuple
+from typing import Any
 from openai import OpenAI
 from datetime import datetime
 
@@ -35,6 +34,19 @@ try:
     logger.info("已加载环境变量文件：%s", _dotenv_path or ".env（默认路径）")
 except Exception as e:
     logger.warning("环境变量文件加载跳过：%s", e)
+
+# ====================== 文本工具模块导入 ======================
+# 纯函数工具（Token 估算等）；模块文件缺失时提供等价兜底实现，保证统计功能不挂
+try:
+    from modules.text_utils import estimate_tokens
+except ImportError:
+    def estimate_tokens(text: str) -> int:
+        """粗略估算文本 Token 数（兜底实现，正常走 modules/text_utils.py）"""
+        if not text:
+            return 0
+        cjk_chars = len(re.findall(r"[一-鿿　-〿＀-￯]", text))
+        other_chars = len(text) - cjk_chars
+        return cjk_chars + other_chars // 4
 
 # ====================== RAG 模块导入 ======================
 # 依赖未安装时自动降级：应用照常运行，仅文档管理功能不可用
@@ -174,12 +186,12 @@ def save_session_to_file() -> None:
         logger.warning("会话保存失败：%s", e)
 
 
-def load_session_from_file() -> Optional[dict]:
+def load_session_from_file() -> dict | None:
     """从本地文件加载持久化会话数据（文件缺失或损坏时返回 None）"""
     save_path = os.path.join(AppConfig.SESSION_FILE_DIR, AppConfig.SESSION_FILE_NAME)
     if os.path.exists(save_path):
         try:
-            with open(save_path, "r", encoding="utf-8") as f:
+            with open(save_path, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             logger.warning("会话文件读取失败，回退默认值：%s", e)
@@ -240,10 +252,18 @@ def init_session_state() -> None:
                                                                                                      DEFAULT_SYSTEM_PROMPT)
 
     if "temperature" not in st.session_state:
-        st.session_state.temperature = AppConfig.DEFAULT_TEMPERATURE if not cache_data else cache_data.get("temperature", AppConfig.DEFAULT_TEMPERATURE)
+        st.session_state.temperature = (
+            AppConfig.DEFAULT_TEMPERATURE
+            if not cache_data
+            else cache_data.get("temperature", AppConfig.DEFAULT_TEMPERATURE)
+        )
 
     if "max_tokens" not in st.session_state:
-        st.session_state.max_tokens = AppConfig.DEFAULT_MAX_TOKENS if not cache_data else cache_data.get("max_tokens", AppConfig.DEFAULT_MAX_TOKENS)
+        st.session_state.max_tokens = (
+            AppConfig.DEFAULT_MAX_TOKENS
+            if not cache_data
+            else cache_data.get("max_tokens", AppConfig.DEFAULT_MAX_TOKENS)
+        )
 
     if "conversation_id" not in st.session_state:
         st.session_state.conversation_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -731,7 +751,7 @@ def create_ai_client() -> OpenAI:
 
 
 # ====================== API核心函数 ======================
-def call_ai_api_stream(messages: List[dict], tools: Optional[List[dict]] = None) -> Tuple[Any, Optional[str]]:
+def call_ai_api_stream(messages: list[dict], tools: list[dict] | None = None) -> tuple[Any, str | None]:
     """流式调用AI接口
 
     Args:
@@ -771,7 +791,7 @@ def call_ai_api_stream(messages: List[dict], tools: Optional[List[dict]] = None)
                     return None, f"❌ 接口请求失败：{error_msg}"
 
 
-def trim_context_messages(messages: List[dict]) -> List[dict]:
+def trim_context_messages(messages: list[dict]) -> list[dict]:
     """裁剪上下文消息（仅保留最近 max_context_msg 条，系统提示词始终保留）"""
     if len(messages) > st.session_state.max_context_msg:
         system_msg = messages[0] if messages and messages[0]["role"] == "system" else None
@@ -782,24 +802,15 @@ def trim_context_messages(messages: List[dict]) -> List[dict]:
     return messages
 
 
-_CJK_RE = re.compile(r"[一-鿿　-〿＀-￯]")
-
-
-def estimate_tokens(text: str) -> int:
-    """粗略估算文本 Token 数（中文字符约 1 token/字，其他字符约 4 字符/token）"""
-    if not text:
-        return 0
-    cjk_chars = len(_CJK_RE.findall(text))
-    other_chars = len(text) - cjk_chars
-    return cjk_chars + other_chars // 4
+# estimate_tokens 已抽取至 modules/text_utils.py（见文件顶部导入区，含兜底实现）
 
 
 def run_tool_loop(
-    messages: List[dict],
+    messages: list[dict],
     content_placeholder: Any,
     tool_placeholder: Any,
-    tools: Optional[List[dict]] = None,
-) -> Tuple[str, List[str], Optional[str], str]:
+    tools: list[dict] | None = None,
+) -> tuple[str, list[str], str | None, str]:
     """带工具调用的多轮对话循环（Function Calling 主流程）
 
     流程：
@@ -1154,7 +1165,11 @@ def render_sidebar() -> None:
         # 文档管理（RAG）
         with st.expander("📄 文档管理"):
             if not RAG_AVAILABLE:
-                st.error("⚠️ RAG 依赖未安装，请执行：\n```\npip install langchain langchain-community langchain-text-splitters chromadb pypdf\n```")
+                st.error(
+                    "⚠️ RAG 依赖未安装，请执行：\n```\n"
+                    "pip install langchain langchain-community "
+                    "langchain-text-splitters chromadb pypdf\n```"
+                )
             else:
                 # RAG 状态获取带异常保护：向量库损坏时不拖垮整个侧边栏
                 try:
@@ -1298,7 +1313,7 @@ def render_sidebar() -> None:
                 )
                 # Markdown 导出：带标题、元信息与角色分节，便于阅读与存档
                 md_lines = [
-                    f"# 对话记录\n",
+                    "# 对话记录\n",
                     f"- 对话ID：{st.session_state.conversation_id}",
                     f"- 导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                     f"- 系统提示词：{st.session_state.system_prompt}\n",

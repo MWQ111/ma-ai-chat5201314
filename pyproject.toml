@@ -1,0 +1,12 @@
+[tool.ruff]
+# 中文注释/文案占宽较大，行宽放宽到 140
+line-length = 140
+target-version = "py310"
+exclude = [".venv", "venv", "session_data", "chroma_db", "resources"]
+
+[tool.ruff.lint]
+# E: 风格错误  F: pyflakes 未用导入/变量  W: 警告  UP: pyupgrade 现代化写法
+select = ["E", "F", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

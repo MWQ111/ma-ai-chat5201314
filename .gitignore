@@ -22,3 +22,4 @@ logs/
 htmlcov/
 .streamlit/secrets.toml
 chroma_db/
+.ruff_cache/

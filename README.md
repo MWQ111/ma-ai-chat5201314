@@ -1,5 +1,7 @@
 # 马氏AI 智能助手（AI Chat Assistant）
 
+![CI](https://github.com/MWQ111/ma-ai-chat5201314/actions/workflows/ci.yml/badge.svg)
+
 一个基于 **Streamlit** 的 AI 智能对话助手，集成了 **RAG 检索增强生成**、**Function Calling 工具调用**、**多模型提供方适配**、**Redis 回答缓存** 与 **Docker 一键部署**。面向大模型应用开发场景，强调工程健壮性与「优雅降级」设计。
 
 > 项目入口：`06.py`（Streamlit 应用主程序）
@@ -64,7 +66,11 @@ flowchart LR
 │   ├── models.py          # 多模型提供方配置（DeepSeek / OpenAI / Ollama）
 │   ├── rag_module.py      # RAG：文档加载 / 切分 / 向量化 / 相似度检索
 │   ├── tools.py           # Function Calling 工具（时间 / 计算 / 搜索）
-│   └── cache.py           # Redis 回答缓存（优雅降级 + 硬超时保护）
+│   ├── cache.py           # Redis 回答缓存（优雅降级 + 硬超时保护）
+│   └── text_utils.py      # 纯文本工具（Token 估算等，无依赖可单测）
+├── tests/                 # pytest 测试套件（单元 + AppTest 集成）
+├── .github/workflows/
+│   └── ci.yml             # CI：ruff 规范检查 + pytest 自动测试
 ├── resources/
 │   └── gdutlogo.png       # 应用图标
 ├── Dockerfile
@@ -73,6 +79,8 @@ flowchart LR
 ├── .dockerignore
 ├── .env.example           # 环境变量模板
 ├── requirements.txt       # 锁定版本的依赖清单
+├── requirements-dev.txt   # 开发/测试依赖（pytest / ruff）
+├── pyproject.toml         # ruff 与 pytest 配置
 └── README.md
 ```
 
@@ -102,6 +110,25 @@ cp .env.example .env          # 填入密钥
 docker compose up -d --build  # 构建并后台启动（含 Redis）
 # 访问 http://localhost:8501
 ```
+
+---
+
+## 🧪 测试与 CI
+
+```bash
+# 安装开发依赖（Windows 若报编码错误，命令前加 PYTHONUTF8=1）
+pip install -r requirements-dev.txt
+
+# 代码规范检查
+ruff check .
+
+# 运行测试（全部用例不触发真实 API 调用）
+pytest -v
+```
+
+- **单元测试**：Token 估算（text_utils）、多模型配置与思考过程提取（models）、计算器正确性与注入防护（tools）、缓存静默降级（cache）。
+- **集成测试**（Streamlit AppTest）：深浅双模式渲染、对话搜索过滤、消息长度拦截、会话原子写入（版本号 / 无临时文件残留）、损坏会话文件降级。
+- **CI**：GitHub Actions 在每次 push / PR 时自动执行 ruff + pytest，仓库首页有状态徽章。
 
 ---
 
@@ -146,7 +173,6 @@ docker compose up -d --build  # 构建并后台启动（含 Redis）
 ## 🧭 后续可改进
 
 - [ ] 将入口文件 `06.py` 重命名为 `app.py`，项目独立命名，目录从「第三章」学习路径中拆分。
-- [ ] 补充单元测试（如 `trim_context_messages`、`estimate_tokens`、缓存读写）。
 - [ ] 增加用户登录 / 对话权限（当前为单机本地应用）。
 - [ ] 接入更丰富的工具（如数据库查询、HTTP 调用）。
 - [ ] 提供在线 Demo 链接（Streamlit Cloud / CloudStudio）。
