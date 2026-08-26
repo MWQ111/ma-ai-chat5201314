@@ -1822,6 +1822,7 @@ if process_msg and process_msg.strip():
 
 st.divider()
 
+
 # ====================== 本地启动入口（仅 `python 06.py` 时生效） ======================
 # ⚠️ 不能用 `if __name__ == "__main__"` 单独判断：Streamlit 执行脚本时
 # __name__ 同样是 "__main__"（见 streamlit 源码 script_runner.py 的官方注释），
@@ -1833,3 +1834,4 @@ if __name__ == "__main__":
     if get_script_run_ctx() is None:  # 无 Streamlit 运行上下文 = 纯 python 启动
         import os
         os.system("streamlit run 06.py --server.headless true")
+
