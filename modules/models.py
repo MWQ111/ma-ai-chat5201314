@@ -54,7 +54,8 @@ MODEL_CONFIGS = {
 # 不在表中的模型（如 Ollama 动态获取的本地模型）使用 DEFAULT_PARAMS
 MODEL_PARAMS = {
     "deepseek-chat":     {"temperature": 0.7, "max_tokens": 4096, "supports_tools": True},
-    "deepseek-reasoner": {"temperature": 0.7, "max_tokens": 8000, "supports_tools": False},  # 推理模型不支持工具调用
+    # 已实测（2026-08）：deepseek-reasoner 同样支持 Function Calling，可正常调用工具
+    "deepseek-reasoner": {"temperature": 0.7, "max_tokens": 8000, "supports_tools": True},
     "gpt-4o":            {"temperature": 0.7, "max_tokens": 4096, "supports_tools": True},
     "gpt-4o-mini":       {"temperature": 0.7, "max_tokens": 4096, "supports_tools": True},
 }
@@ -145,26 +146,34 @@ def get_model_config(model_name, provider_key=None):
     }
 
 
-def list_ollama_models(base_url=None, timeout=3):
+def list_ollama_models(base_url=None, timeout=5):
     """动态获取 Ollama 本地已安装的模型列表
 
-    通过 Ollama 的 OpenAI 兼容接口 GET /models 查询，与对话调用同一条链路。
+    通过 Ollama 原生接口 GET /api/tags 查询。注意：配置表中的 base_url 是
+    OpenAI 兼容地址（形如 http://localhost:11434/v1），而 /api/tags 位于
+    Ollama 服务根路径下，因此需先去掉 /v1 后缀再拼接，对话调用不受影响。
 
     Args:
-        base_url: Ollama 服务地址（默认取配置表中的 base_url）
+        base_url: Ollama 服务地址（默认取配置表中的 base_url，可带 /v1 后缀）
         timeout: 请求超时秒数（本地服务短超时，保证服务不可用时界面不卡顿）
 
     Returns:
         tuple: (模型名列表, 错误信息) — 服务不可用时返回 ([], 错误说明)，绝不抛异常
     """
     base = (base_url or MODEL_CONFIGS["ollama"]["base_url"]).rstrip("/")
+    # 去掉 OpenAI 兼容路径后缀（/v1 等），/api/tags 挂在 Ollama 服务根路径下
+    root_url = base
+    for suffix in ("/v1", "/v2"):
+        if root_url.endswith(suffix):
+            root_url = root_url[: -len(suffix)]
+            break
     try:
-        with urllib.request.urlopen(f"{base}/models", timeout=timeout) as resp:
+        with urllib.request.urlopen(f"{root_url}/api/tags", timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        models = [m.get("name", "") for m in data.get("data", []) if m.get("name")]
+        models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
         return sorted(models), ""
     except Exception as e:
-        return [], f"无法连接 Ollama 服务：{str(e)}"
+        return [], f"无法连接 Ollama 服务：{str(e)}。请确认 Ollama 已启动（运行 ollama serve）"
 
 
 def extract_reasoning(chunk):

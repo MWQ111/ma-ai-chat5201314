@@ -8,7 +8,8 @@ DeepSeek / OpenAI 等模型均可直接使用。
 
 注意事项：
 - 网络搜索依赖 ddgs 库（DuckDuckGo，免 API 密钥），未安装时自动从工具列表剔除
-- deepseek-reasoner 模型不支持工具调用，由主程序判断跳过（并带自动重试兜底）
+- deepseek-chat / deepseek-reasoner 均已实测支持工具调用；个别不支持的模型由
+  主程序先尝试、失败后在回答中明确提示降级（绝不静默跳过）
 - 数学计算使用 AST 白名单解析，杜绝 eval 注入风险
 """
 
@@ -54,7 +55,10 @@ _SQRT_PATTERN = re.compile(r"√\s*(\d+(?:\.\d+)?|\([^()]*\))")
 
 
 def _preprocess_expression(expression):
-    """预处理表达式：将 √ 符号规范为 sqrt() 函数调用
+    """预处理表达式：将 √ 规范为 sqrt()、^ 规范为 **（幂运算）
+
+    === FIX: 模型与用户常用 3^33 表示 3 的 33 次方，而 Python 中 ^ 是按位异或，
+    直接求值会报"不支持的运算符"并浪费一整轮工具调用，这里统一转换为 ** ===
 
     Args:
         expression: 原始表达式字符串
@@ -68,6 +72,7 @@ def _preprocess_expression(expression):
     expr = _SQRT_PATTERN.sub(r"sqrt(\1)", expression)
     if "√" in expr:
         raise ValueError("√ 用法不正确，请写成 √16 或 √(1+3) 的形式")
+    expr = expr.replace("^", "**")  # === FIX: 兼容 ^ 幂运算写法 ===
     return expr
 
 
@@ -126,13 +131,14 @@ def _safe_eval_node(node):
 
 
 def calculate(expression):
-    """安全计算数学表达式（支持 + - * / ** √，禁止一切危险语法）
+    """安全计算数学表达式（支持 + - * / **（或 ^）√，禁止一切危险语法）
 
     Args:
-        expression: 数学表达式字符串，如 "2+3*4"、"2**10"、"√16"、"(1+2)*3"
+        expression: 数学表达式字符串，如 "2+3*4"、"2**10"、"3^33"、"√16"、"(1+2)*3"
 
     Returns:
-        str: 计算结果；表达式非法、除零等错误时返回错误说明（不抛异常）
+        str: 成功返回 "计算结果：xxx"，失败返回 "计算错误：xxx"。
+        === FIX: 带明确的前缀，模型不会把裸数字误解为"还需要继续计算" ===
     """
     try:
         expr = _preprocess_expression(expression.strip())
@@ -140,14 +146,16 @@ def calculate(expression):
         result = _safe_eval_node(tree)
         # 整数值的浮点结果（如 4.0）显示为整数
         if isinstance(result, float) and result.is_integer():
-            return str(int(result))
-        return str(result)
+            result = int(result)
+        # === FIX: 成功结果带明确前缀，避免 AI 误判需要再次调用工具 ===
+        return f"计算结果：{result}"
     except ZeroDivisionError:
-        return "错误：除数不能为 0"
+        # === FIX: 错误信息统一 "计算错误：" 前缀 ===
+        return "计算错误：除数不能为 0"
     except (ValueError, SyntaxError) as e:
-        return f"错误：表达式不合法（{e}）"
+        return f"计算错误：表达式不合法（{e}）"
     except Exception as e:
-        return f"错误：计算失败（{e}）"
+        return f"计算错误：计算失败（{e}）"
 
 
 def search_web(query, max_results=5):
@@ -200,7 +208,8 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "calculate",
-            "description": "计算数学表达式。支持 + - * / **（幂）和 √（开方），例如 2+3*4、2**10、√16。当用户要求计算数学题时使用。",
+            "description": ("计算数学表达式。支持 + - * /、** 或 ^（幂）和 √（开方），"
+                           "例如 2+3*4、2**10、3^33、√16。当用户要求计算数学题时使用。"),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -235,6 +244,83 @@ _EXECUTORS = {
     "calculate": calculate,
     "search_web": search_web,
 }
+
+
+# ====================== 工具启用辅助（提示词与历史自愈） ======================
+# 历史对话中若出现过助手否认工具能力的回复（多见于未启用工具时或模型
+# 被误判为不支持工具时），模型会"模仿"自己的旧回复，即使本轮请求里带了
+# 工具定义也继续拒绝调用。通过两招破除这种锚定：
+#   ① 系统指令（build_tools_directive）声明工具可用并要求必须调用；
+#   ② 检测到否认历史时，在历史末尾追加一条"工具已接入"的助手确认回合
+#      （build_tools_ack）——最近的助手回合具有最强的示范效应。
+
+# 工具在提示词中的用途说明（build_tools_directive 使用）
+_TOOL_DIRECTIVE_DESCRIPTIONS = {
+    "get_current_time": "查询当前日期和时间",
+    "calculate": "计算数学表达式",
+    "search_web": "搜索网络实时信息",
+}
+
+# 助手"否认工具能力"回复的识别模式（仅检测 assistant 角色消息）。
+# 误判的代价只是多注入一条确认回合，对回答无副作用，宁可多检不漏检。
+_TOOL_DENIAL_PATTERNS = [
+    re.compile(r"没有.{0,10}(调用|开放|连接|接入|使用|权限).{0,10}(工具|时间|天气|网络)"),
+    re.compile(r"没有.{0,8}(查看|看|查).{0,6}(时间|天气|新闻).{0,6}(工具|功能|能力)"),
+    re.compile(r"(工具|功能).{0,8}(未开放|不可用|没有接入|已关闭|没.{0,4}开放)"),
+    re.compile(r"无法.{0,6}(调用|使用|查询|访问).{0,6}(工具|时间|天气|网络)"),
+]
+
+
+def has_tool_denial(messages):
+    """检测历史消息中是否存在助手否认工具能力的回复
+
+    Args:
+        messages: API 消息列表（dict 列表，含 role/content 字段）
+
+    Returns:
+        bool: 存在否认回复时返回 True（主程序据此追加工具确认回合）
+    """
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        text = m.get("content") or ""
+        if any(p.search(text) for p in _TOOL_DENIAL_PATTERNS):
+            return True
+    return False
+
+
+def build_tools_directive():
+    """生成系统提示词附加指令：声明工具可用，并要求在相应场景必须调用
+
+    Returns:
+        str: 追加到系统提示词末尾的指令文本
+    """
+    tool_lines = "、".join(
+        f"{t['function']['name']}（{_TOOL_DIRECTIVE_DESCRIPTIONS.get(t['function']['name'], '')}）"
+        for t in get_available_tools()
+    )
+    return (
+        "\n\n【工具调用】系统已为你接入以下工具（这是系统级事实，历史对话中助手声称"
+        "“没有工具/没有权限”的说法均已过时无效）："
+        + tool_lines
+        + "。当用户询问当前时间、日期、星期几，或要求计算数学表达式，或需要实时信息时，"
+        "必须调用对应工具获取结果，禁止声称自己没有相关能力。"
+    )
+
+
+def build_tools_ack():
+    """生成插入历史末尾的"工具已接入"助手确认回合
+
+    最近的助手回合对模型行为有最强示范效应：在历史中出现过否认工具的回复时，
+    追加本回合可让模型切换到"先调用工具"的行为模式。
+
+    Returns:
+        str: 确认回合的文本
+    """
+    return (
+        "好的，收到！我现在已经接入了工具调用能力（时间查询、数学计算、网络搜索），"
+        "遇到需要实时信息或精确计算的问题时，我会直接调用对应工具来回答。"
+    )
 
 
 # ====================== 对外接口 ======================

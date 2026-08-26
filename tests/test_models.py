@@ -41,10 +41,10 @@ def test_get_model_config_deepseek():
     assert cfg["api_key"] == os.environ.get("DEEPSEEK_API_KEY", "")
 
 
-def test_get_model_config_reasoner_no_tools():
-    """推理模型不支持工具调用，主程序据此自动跳过"""
+def test_get_model_config_reasoner_supports_tools():
+    """deepseek-reasoner 已实测支持工具调用（2026-08 通过真实 API 验证）"""
     cfg = get_model_config("deepseek-reasoner", provider_key="deepseek")
-    assert cfg["supports_tools"] is False
+    assert cfg["supports_tools"] is True
 
 
 def test_get_model_config_ollama_placeholder_key():

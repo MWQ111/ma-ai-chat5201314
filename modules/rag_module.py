@@ -238,17 +238,26 @@ def load_document(file):
 
 
 def add_to_vectorstore(docs):
-    """将文档片段批量写入向量库
+    """将文档片段批量写入向量库（内置去重：同名文件已存在时拒绝入库）
 
     Args:
         docs: load_document 返回的片段列表
 
     Returns:
         int: 成功写入的片段数量
+
+    Raises:
+        ValueError: 文档内容为空，或同名文件已入库时抛出
     """
     if not docs:
         raise ValueError("文档内容为空，没有可入库的片段")
     collection = _get_collection()
+    # 去重保护：同名文件已入库时拒绝再次写入（界面层已拦截，此处作为兜底防线）
+    file_name = (docs[0].metadata or {}).get("file_name", "")
+    if file_name:
+        existing = collection.get(where={"file_name": file_name}, include=["metadatas"])
+        if existing.get("ids"):
+            raise ValueError(f"文件《{file_name}》已存在，请勿重复上传")
     collection.add(
         ids=[uuid.uuid4().hex for _ in docs],
         documents=[d.page_content for d in docs],
@@ -327,10 +336,40 @@ def get_document_list():
 def delete_document(doc_id):
     """按文档ID删除单个文档的所有向量片段
 
+    先按 doc_id 查出全部片段 ID，再按 ID 精确删除：部分 ChromaDB 版本
+    对 where 过滤删除支持不佳（可能静默失败导致"点击没反应"），按 ID
+    删除更可靠，且能返回实际删除数量供界面提示。
+
     Args:
         doc_id: 文档唯一标识（load_document 时生成）
+
+    Returns:
+        int: 实际删除的片段数量（0 表示该文档不存在或已被删除）
+
+    Raises:
+        ValueError: doc_id 为空时抛出
     """
-    _get_collection().delete(where={"doc_id": doc_id})
+    if not doc_id:
+        raise ValueError("文档ID为空，无法删除")
+    collection = _get_collection()
+    # 第一步：查出该文档的全部片段 ID（顺带确认文档是否存在）
+    existing = collection.get(where={"doc_id": doc_id}, include=["metadatas"])
+    ids = existing.get("ids") or []
+    if not ids:
+        return 0
+    # 第二步：按 ID 精确删除
+    collection.delete(ids=ids)
+    return len(ids)
+
+
+def invalidate_collection_cache():
+    """重置集合单例缓存，强制下次访问重新从 ChromaDB 加载最新数据
+
+    删除文档后调用，确保 get_document_list 等函数能立即反映删除结果
+    （避免 _get_collection 缓存的集合对象返回旧数据）。
+    """
+    global _collection
+    _collection = None
 
 
 def clear_all():

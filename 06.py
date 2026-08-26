@@ -57,6 +57,7 @@ try:
         search,
         get_document_list,
         delete_document,
+        invalidate_collection_cache,
         clear_all,
         get_rag_status,
     )
@@ -67,7 +68,10 @@ except ImportError:
 # ====================== 工具模块导入 ======================
 # 同样自动降级：工具不可用时应用照常运行
 try:
-    from modules.tools import get_available_tools, get_tool_names, execute_tool
+    from modules.tools import (
+        get_available_tools, get_tool_names, execute_tool,
+        has_tool_denial, build_tools_directive, build_tools_ack,
+    )
     TOOLS_AVAILABLE = True
 except ImportError:
     TOOLS_AVAILABLE = False
@@ -182,6 +186,9 @@ def save_session_to_file() -> None:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, save_path)  # 原子替换：写入中断也不会损坏原文件
+        logger.info("会话已保存到 %s（对话 %d 条，当前索引 %s）",
+                    save_path, len(save_data["conversations"]),
+                    save_data["current_conversation_index"])
     except Exception as e:
         logger.warning("会话保存失败：%s", e)
 
@@ -300,6 +307,12 @@ def init_session_state() -> None:
 
     if "cache_enabled" not in st.session_state:
         st.session_state.cache_enabled = True
+
+    # 联动约束兜底：缓存开启时 RAG 与工具调用必须关闭。
+    # 正常交互由 on_change 回调维护，这里兜底处理默认值冲突与旧版持久化数据。
+    if st.session_state.cache_enabled:
+        st.session_state.rag_enabled = False
+        st.session_state.tools_enabled = False
 
     # ===== 校验提供方/模型组合是否有效（旧版持久化数据或模型列表变更后自动回退默认） =====
     if MODELS_AVAILABLE:
@@ -818,9 +831,11 @@ def run_tool_loop(
     2. 若 AI 返回 tool_calls → 逐个执行工具，结果以 tool 消息追加回对话，进入下一轮
     3. 若 AI 直接回复正文 → 结束循环，返回最终回复
     4. 最多循环 MAX_TOOL_ROUNDS 轮，防止死循环
-    5. 模型不支持工具调用时报错 → 自动去掉 tools 重试一次（兼容 reasoner 等模型）
+    5. 工具请求失败（如模型不支持工具调用）→ 自动去掉 tools 重试一次，降级原因随最终回答明确提示（绝不静默）
     6. 流式 30 秒停滞保护（客户端 read 超时 + 循环内检查双保险），中断时保留已接收内容
     7. 工具结果超过 4000 字符自动截断，防止挤爆上下文窗口
+    8. === FIX: 工具结果回传后追加"停止调用"系统消息，强制 AI 直接给出最终回答，防止无限循环 ===
+    9. === FIX: 达到轮数上限时返回最后一轮已有内容并附上限提示，不再直接丢弃 ===
 
     Args:
         messages: 完整的 API 消息列表（system + 历史对话，本函数会就地追加中间消息）
@@ -836,16 +851,30 @@ def run_tool_loop(
     reasoning_text = ""             # 累积的模型思考过程（如 deepseek-reasoner）
     reasoning_placeholder = None    # 思考过程实时展示占位符（首次收到思考内容时创建）
     allow_retry_without_tools = tools is not None  # 首次调用带工具时，报错可降级重试
+    degrade_notice = None           # 工具请求失败降级为普通对话时的提示（最终回答中展示）
+    # === FIX: full_content 提升到循环外定义，达到轮数上限时能返回最后一轮已有内容 ===
+    full_content = ""
 
-    for _ in range(MAX_TOOL_ROUNDS):
+    for round_idx in range(MAX_TOOL_ROUNDS):
+        # === FIX: 每轮开始记录日志：轮次与累计已调用的工具 ===
+        logger.info("工具循环第 %d/%d 轮开始（已调用工具：%s）",
+                    round_idx + 1, MAX_TOOL_ROUNDS, "、".join(tools_used) or "无")
         if tools:
             content_placeholder.markdown("🤔 正在思考是否调用工具...")
 
         stream, err = call_ai_api_stream(messages, tools=tools)
         if err:
-            # 模型不支持工具调用（如 deepseek-reasoner）时，去掉 tools 降级重试一次
-            if allow_retry_without_tools:
+            # 工具请求失败（如模型不支持工具调用）时，去掉 tools 降级重试一次，
+            # 并把降级原因记入 degrade_notice 随最终回答展示——绝不静默降级。
+            # 若历史中已含 tool 消息则不能去工具重试（接口会拒绝不配套的 tool 消息），
+            # 直接返回错误。
+            if (allow_retry_without_tools
+                    and not any(m.get("role") == "tool" for m in messages)):
                 allow_retry_without_tools = False
+                degrade_notice = (
+                    "⚠️ 工具调用请求失败，已自动降级为普通对话（本轮不再调用工具）："
+                    + err.replace("❌", "").strip()
+                )
                 tools = None
                 stream, err = call_ai_api_stream(messages, tools=None)
             if err:
@@ -863,7 +892,10 @@ def run_tool_loop(
                     logger.warning("流式响应停滞超过 %s 秒，中止本轮接收",
                                    AppConfig.STREAM_STALL_TIMEOUT)
                     if full_content:
-                        return full_content, tools_used, "⚠️ 响应中断：部分内容已返回", reasoning_text
+                        stall_err = "⚠️ 响应中断：部分内容已返回"
+                        return (full_content, tools_used,
+                                f"{degrade_notice}；{stall_err}" if degrade_notice else stall_err,
+                                reasoning_text)
                     return "", tools_used, "❌ 流式响应超时（30 秒无数据），请重试", reasoning_text
                 last_chunk_time = time.monotonic()
                 delta = chunk.choices[0].delta
@@ -898,15 +930,23 @@ def run_tool_loop(
             # 流中途断连（如 read 超时）：保留已接收内容降级返回，不崩溃
             logger.warning("流式接收中断：%s", e)
             if full_content:
-                return full_content, tools_used, "⚠️ 流式响应中断，已返回部分内容", reasoning_text
+                cut_err = "⚠️ 流式响应中断，已返回部分内容"
+                return (full_content, tools_used,
+                        f"{degrade_notice}；{cut_err}" if degrade_notice else cut_err,
+                        reasoning_text)
             return "", tools_used, f"❌ 流式响应中断：{e}", reasoning_text
 
-        # 没有工具调用 → AI 已给出最终回答
+        # === FIX: 最终回答检测——本轮 AI 未请求任何工具，即视为已给出最终答案，立即返回 ===
         if not tool_calls:
-            return full_content, tools_used, None, reasoning_text
+            logger.info("工具循环第 %d 轮：AI 未请求工具，直接给出最终回答", round_idx + 1)
+            return full_content, tools_used, degrade_notice, reasoning_text
 
         # AI 请求调用工具：执行并把结果回传
         call_list = list(tool_calls.values())
+        # === FIX: 记录本轮 AI 请求调用的工具清单 ===
+        call_names = [c["function"]["name"] for c in call_list]
+        logger.info("工具循环第 %d 轮：AI 请求调用工具 %s",
+                    round_idx + 1, "、".join(call_names))
         messages.append({
             "role": "assistant",
             "content": full_content or None,
@@ -929,13 +969,32 @@ def run_tool_loop(
                                name, len(result), AppConfig.MAX_TOOL_RESULT_CHARS)
                 result = (result[:AppConfig.MAX_TOOL_RESULT_CHARS]
                           + "…（结果过长，已截断）")
+            # === FIX: 记录工具执行结果（截断日志，避免超长结果刷屏） ===
+            logger.info("工具 %s 执行完成（第 %d 轮），结果：%s",
+                        name, round_idx + 1, result[:200])
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],
                 "content": result,
             })
+        # === FIX: 工具结果全部回传后，追加"停止调用"系统消息，强制 AI 下一轮
+        # 直接给出最终回答，不再发起新的工具调用（同一轮内的并行多工具调用不受影响），
+        # 从根源上杜绝"反复调用工具直到轮数上限"的无限循环 ===
+        messages.append({
+            "role": "system",
+            "content": "你已获得所有工具结果，请直接回答用户的问题，不要再调用任何工具。",
+        })
 
-    return "", tools_used, "❌ 工具调用轮数超过上限，请简化问题后重试", reasoning_text
+    # === FIX: 轮数上限保护：返回最后一轮已有内容并附上限提示，而不是直接丢弃 ===
+    logger.warning("工具循环达到 %d 轮上限仍未收敛（已调用：%s）",
+                   MAX_TOOL_ROUNDS, "、".join(tools_used))
+    if full_content:
+        return (full_content, tools_used,
+                "⚠️ 工具调用已达上限（3轮），已返回部分结果，回答可能不完整",
+                reasoning_text)
+    return ("", tools_used,
+            "⚠️ 工具调用已达上限（3轮），未能完成回答，请简化问题后重试",
+            reasoning_text)
 
 
 # ====================== 页面渲染函数 ======================
@@ -1120,9 +1179,80 @@ def _render_legacy_api_config() -> None:
         st.rerun()
 
 
+# ====================== 功能开关联动（缓存 / RAG / 工具调用） ======================
+# Streamlit 的 on_change 回调先于 session_state 更新执行：回调内读到的
+# 是切换前的旧值，因此「旧值为 False」即表示用户本次操作是「开启」。
+def _on_cache_enabled_change() -> None:
+    """缓存开关联动：开启缓存时自动关闭 RAG 与工具调用"""
+    if not st.session_state.cache_enabled:  # 旧值为 False → 本次为开启
+        st.session_state.rag_enabled = False
+        st.session_state.tools_enabled = False
+
+
+def _on_rag_enabled_change() -> None:
+    """RAG 开关联动：开启文档检索时自动关闭缓存（RAG 与工具调用不互斥）"""
+    if not st.session_state.rag_enabled:
+        st.session_state.cache_enabled = False
+
+
+def _on_tools_enabled_change() -> None:
+    """工具开关联动：开启工具调用时自动关闭缓存（RAG 与工具调用不互斥）"""
+    if not st.session_state.tools_enabled:
+        st.session_state.cache_enabled = False
+
+
+def _delete_conversation(idx: int) -> None:
+    """删除指定索引的历史对话（删除按钮的 on_click 回调）
+
+    1. 状态修改 + save_session_to_file() + st.rerun() 全部在回调里完成，
+       保证删除后界面立即重渲染；
+    2. 删除后按被删位置修正 current_conversation_index，防止越界与错位：
+       - 删除的是当前对话之前的条目 → 当前索引 -1（列表前移）
+       - 删除的是当前对话本身 → 切换到相邻条目（优先后一个；
+         删的是最后一条则退到前一条，pop 后的列表用 min 统一处理）
+       - 删除的是当前对话之后的条目 → 当前索引不变
+    """
+    conversations = st.session_state.conversations
+    if not (0 <= idx < len(conversations)):
+        logger.error("删除对话参数越界：idx=%s，共 %d 条", idx, len(conversations))
+        return
+    if len(conversations) <= 1:
+        logger.warning("拒绝删除：仅剩 1 条对话，至少保留一条")
+        return
+
+    current_idx = st.session_state.current_conversation_index
+    removed = conversations.pop(idx)
+
+    if idx < current_idx:
+        # 删除的是当前对话之前的条目：当前对话随列表前移一位
+        st.session_state.current_conversation_index = current_idx - 1
+    elif idx == current_idx:
+        # 删除的是当前对话：pop 后原位置即"后一个"对话；
+        # 若删的是最后一条，则退到新的最后一条（即前一条）
+        new_idx = min(idx, len(conversations) - 1)
+        st.session_state.current_conversation_index = new_idx
+        st.session_state.messages = conversations[new_idx].get("messages", [])
+        st.session_state.conversation_id = conversations[new_idx].get("id", "")
+    # idx > current_idx：当前对话位置不变，无需处理
+
+    st.session_state._conv_deleted_name = removed.get("name", "")
+    save_session_to_file()
+    st.rerun()
+
+
 # ====================== 侧边栏渲染 ======================
 def render_sidebar() -> None:
     """渲染侧边栏所有功能"""
+    # 文档上传"处理完成"标记：各处理分支只负责置 True + st.rerun()，
+    # 清空上传器统一在这里完成。新版 Streamlit 禁止给 file_uploader 的
+    # key 直接赋值（即使实例化之前也会报 StreamlitValueAssignmentNotAllowedError），
+    # 改用 del 删除 key：widget 实例化时会重新创建该 key，等价于清空上传器。
+    if st.session_state.pop("_doc_uploader_done", False):
+        if "doc_uploader" in st.session_state:
+            del st.session_state["doc_uploader"]
+    # 历史对话删除成功提示：_delete_conversation 回调里置标志，本处渲染 toast
+    if deleted_name := st.session_state.pop("_conv_deleted_name", None):
+        st.toast(f"🗑️ 已删除对话「{deleted_name}」")
     with st.sidebar:
         st.markdown("## 🤖 AI 智能助手")
         st.divider()
@@ -1183,37 +1313,58 @@ def render_sidebar() -> None:
                     st.caption(status_msg)
 
                 st.toggle("🔍 提问时检索文档", key="rag_enabled",
-                          help="开启后，提问会先从已上传文档中检索相关内容再交给AI回答")
+                          disabled=st.session_state.cache_enabled,
+                          on_change=_on_rag_enabled_change,
+                          help="开启后，提问会先从已上传文档中检索相关内容再交给AI回答；"
+                               "开启时自动关闭 Redis 缓存，且缓存开启期间本开关被禁用")
 
                 upload_file = st.file_uploader(
                     "上传文档（PDF / TXT / MD）",
                     type=["pdf", "txt", "md"],
                     disabled=not ready,
-                    help="上传后自动切分并向量化；支持 PDF、TXT、Markdown 格式"
+                    help="上传后自动切分并向量化；支持 PDF、TXT、Markdown 格式",
+                    key="doc_uploader",  # 固定 key；清空动作在 render_sidebar 顶部完成（widget 实例化之前）
                 )
                 if upload_file is not None:
+                    # 重复检查：同名文件已入库时跳过，防止创建重复记录
+                    existing_names = set()
+                    if ready:
+                        try:
+                            existing_names = {doc["file_name"] for doc in get_document_list()}
+                        except Exception as e:
+                            logger.error("读取文档列表失败：%s", e)
+                    if upload_file.name in existing_names:
+                        st.warning(f"⚠️ 《{upload_file.name}》已存在，已跳过上传（如需更新请先删除原文档）")
+                        st.session_state["_doc_uploader_done"] = True
+                        st.rerun()
                     # 10MB 上限保护：超大文件会导致内存与页面卡死
                     if upload_file.size > AppConfig.MAX_UPLOAD_SIZE:
                         st.error(f"❌ 文件超过 {AppConfig.MAX_UPLOAD_SIZE // (1024 * 1024)}MB 限制，无法上传")
-                    else:
-                        try:
-                            with st.spinner(f"正在处理《{upload_file.name}》..."):
-                                chunks = load_document(upload_file)
-                                if not chunks:
-                                    st.error(f"❌ 《{upload_file.name}》未解析出任何内容，请检查文件格式")
-                                    st.stop()
-                                # 加载与向量化分开捕获：定位失败环节更准确
-                                try:
-                                    n_added = add_to_vectorstore(chunks)
-                                except Exception as e:
-                                    logger.error("文档向量化失败：%s", e)
-                                    st.error(f"❌ 文档向量化失败：{str(e)}")
-                                    st.stop()
-                            st.success(f"✅ 《{upload_file.name}》入库成功（{n_added} 个片段）")
-                            st.rerun()
-                        except Exception as e:
-                            logger.error("文档加载失败：%s", e)
-                            st.error(f"❌ 文档加载失败：{str(e)}")
+                        st.session_state["_doc_uploader_done"] = True
+                        st.rerun()
+                    try:
+                        with st.spinner(f"正在处理《{upload_file.name}》..."):
+                            chunks = load_document(upload_file)
+                            if not chunks:
+                                st.error(f"❌ 《{upload_file.name}》未解析出任何内容，请检查文件格式")
+                                st.session_state["_doc_uploader_done"] = True
+                                st.rerun()
+                            # 加载与向量化分开捕获：定位失败环节更准确
+                            try:
+                                n_added = add_to_vectorstore(chunks)
+                            except Exception as e:
+                                logger.error("文档向量化失败：%s", e)
+                                st.error(f"❌ 文档向量化失败：{str(e)}")
+                                st.session_state["_doc_uploader_done"] = True
+                                st.rerun()
+                        st.success(f"✅ 《{upload_file.name}》入库成功（{n_added} 个片段）")
+                        st.session_state["_doc_uploader_done"] = True
+                        st.rerun()
+                    except Exception as e:
+                        logger.error("文档加载失败：%s", e)
+                        st.error(f"❌ 文档加载失败：{str(e)}")
+                        st.session_state["_doc_uploader_done"] = True
+                        st.rerun()
 
                 # 文档列表与统计
                 doc_list = []
@@ -1234,12 +1385,18 @@ def render_sidebar() -> None:
                         if st.button("🗑️", key=f"del_doc_{doc['doc_id']}",
                                      help="删除此文档", use_container_width=True):
                             try:
-                                delete_document(doc["doc_id"])
+                                n_deleted = delete_document(doc["doc_id"])
                             except Exception as e:
+                                # 删除异常：记录日志并向界面显示具体错误信息
                                 logger.error("删除文档失败：%s", e)
-                                st.error(f"❌ 删除失败：{str(e)}")
+                                st.error(f"❌ 删除《{doc['file_name']}》失败：{str(e)}")
                             else:
-                                st.success(f"✅ 已删除《{doc['file_name']}》")
+                                # 删除成功后强制刷新向量库缓存，再 rerun 重新加载文档列表
+                                invalidate_collection_cache()
+                                if n_deleted > 0:
+                                    st.success(f"✅ 已删除《{doc['file_name']}》（{n_deleted} 个片段）")
+                                else:
+                                    st.warning(f"⚠️ 未在向量库中找到《{doc['file_name']}》的片段，可能已被删除")
                                 st.rerun()
 
                 if st.button("🧹 清空所有文档", use_container_width=True,
@@ -1259,14 +1416,20 @@ def render_sidebar() -> None:
                 st.error("⚠️ 工具模块加载失败，请检查 modules/tools.py")
             else:
                 st.toggle("🔧 启用工具调用", key="tools_enabled",
-                          help="开启后，AI 可调用时间、计算器、网络搜索等工具，回答需要实时信息或精确计算的问题")
+                          disabled=st.session_state.cache_enabled,
+                          on_change=_on_tools_enabled_change,
+                          help="开启后，AI 可调用时间、计算器、网络搜索等工具，回答需要实时信息或精确计算的问题；"
+                               "开启时自动关闭 Redis 缓存，且缓存开启期间本开关被禁用")
                 st.caption("可用工具：" + "、".join(get_tool_names()))
                 if MODELS_AVAILABLE:
                     model_cfg = get_model_config(
                         st.session_state.current_model,
                         provider_key=st.session_state.provider)
                     if not model_cfg["supports_tools"]:
-                        st.caption(f"⚠️ 当前模型 {st.session_state.current_model} 不支持工具调用，已自动跳过")
+                        st.caption(
+                            f"⚠️ 当前模型 {st.session_state.current_model} 标记为不支持工具调用："
+                            "提问时仍会先尝试，请求失败后自动降级并在回答中明确提示"
+                        )
 
         # 缓存设置（Redis）
         with st.expander("📦 缓存设置"):
@@ -1274,7 +1437,9 @@ def render_sidebar() -> None:
                 st.error("⚠️ 缓存模块加载失败，请检查 modules/cache.py")
             else:
                 st.toggle("📦 启用Redis缓存", key="cache_enabled",
-                          help="相同问题命中缓存时直接返回，减少API调用成本；Redis不可用时自动跳过")
+                          on_change=_on_cache_enabled_change,
+                          help="相同问题命中缓存时直接返回，减少API调用成本；Redis不可用时自动跳过。"
+                               "开启时自动关闭「提问时检索文档」与「启用工具调用」")
                 status_text, status_level = get_cache_status()
                 if status_level == "ok":
                     st.caption("✅ " + status_text)
@@ -1379,8 +1544,13 @@ def render_sidebar() -> None:
         with col2:
             if st.button("🗑️ 清空当前", use_container_width=True):
                 st.session_state.messages = []
-                if st.session_state.conversations:
-                    st.session_state.conversations[st.session_state.current_conversation_index]["messages"] = []
+                conv_idx = st.session_state.current_conversation_index
+                if st.session_state.conversations and 0 <= conv_idx < len(st.session_state.conversations):
+                    st.session_state.conversations[conv_idx]["messages"] = []
+                else:
+                    # 防御：索引越界时直接索引会崩溃，导致后面的 st.rerun() 不执行
+                    logger.error("清空当前：索引 %s 越界（共 %d 条），跳过对话内消息清空",
+                                 conv_idx, len(st.session_state.conversations))
                 save_session_to_file()
                 st.success("✅ 已清空当前对话")
                 st.rerun()
@@ -1440,7 +1610,8 @@ def render_sidebar() -> None:
                         new_name = st.text_input(
                             "",
                             value=conv["name"],
-                            key=f"conv_name_edit_{idx}",
+                            # key 用对话 id 而非索引：删除后索引位移不会串位
+                            key=f"conv_name_edit_{conv.get('id', idx)}",
                             label_visibility="collapsed",
                             placeholder="对话名称"
                         )
@@ -1464,33 +1635,19 @@ def render_sidebar() -> None:
                             st.rerun()
 
                 with col_del:
-                    # 仅保留删除按钮，移除重新生成功能
-                    # 如果只有一条对话，禁用删除或提示，但保留删除逻辑（至少保留一个对话）
+                    # 仅保留删除按钮；仅剩一条对话时禁用（至少保留一条）。
+                    # 删除逻辑放在 on_click 回调 _delete_conversation 中：
+                    # 回调里修改状态 + st.rerun()，保证界面在删除后立即刷新。
                     del_disabled = len(st.session_state.conversations) <= 1
-                    if st.button(
-                            "🗑️",
-                            key=f"del_conv_{idx}",
-                            help="删除此对话",
-                            disabled=del_disabled,
-                            use_container_width=True
-                    ):
-                        if len(st.session_state.conversations) > 1:
-                            # 删除当前对话时，需要切换到其他对话
-                            if idx == st.session_state.current_conversation_index:
-                                # 切换到前一个或后一个
-                                new_idx = idx - 1 if idx > 0 else 0
-                                # 但要保证新索引有效
-                                if new_idx >= len(st.session_state.conversations) - 1:
-                                    new_idx = 0
-                                st.session_state.current_conversation_index = new_idx
-                                st.session_state.messages = st.session_state.conversations[new_idx]["messages"]
-                                st.session_state.conversation_id = st.session_state.conversations[new_idx]["id"]
-                            # 执行删除
-                            st.session_state.conversations.pop(idx)
-                            save_session_to_file()
-                            st.rerun()
-                        else:
-                            st.warning("至少保留一个对话")
+                    st.button(
+                        "🗑️",
+                        key=f"del_conv_{idx}",
+                        help="删除此对话",
+                        disabled=del_disabled,
+                        use_container_width=True,
+                        on_click=_delete_conversation,
+                        args=(idx,),
+                    )
 
                 # 可选：显示创建时间的小灰字（美观）
                 st.caption(f"📅 {conv['created_at']}")
@@ -1561,7 +1718,19 @@ if process_msg and process_msg.strip():
             logger.warning("文档检索失败：%s", e)
             st.warning(f"⚠️ 文档检索失败：{str(e)}")
 
-    # 将检索到的片段拼接到系统提示词中，引导AI基于文档回答
+    # 判断是否启用工具调用：启用后一律尝试（deepseek-chat / reasoner 均已实测支持
+    # 工具调用）；个别不支持工具的模型由 run_tool_loop 在请求失败后自动降级，
+    # 并在回答中给出明确提示，绝不静默跳过
+    tools_for_call = None
+    if TOOLS_AVAILABLE and st.session_state.tools_enabled:
+        tools_for_call = get_available_tools()
+
+    # 组装 API 消息列表：
+    # 1) 仅保留 role/content —— 会话消息携带 sources/tools_used/reasoning 等展示字段，
+    #    原样发送会污染接口请求；
+    # 2) 启用工具时，把工具调用指令追加到系统提示词（声明工具可用并要求必须调用）；
+    # 3) 历史中出现过助手"否认工具能力"的回复时，追加一条"工具已接入"的确认回合，
+    #    破除模型对旧回复的模仿（否则即使请求携带了工具定义，模型也会继续拒绝调用）。
     api_msgs = [{"role": "system", "content": st.session_state.system_prompt}]
     if rag_sources:
         context_text = "\n\n".join(
@@ -1574,23 +1743,17 @@ if process_msg and process_msg.strip():
             "如果文档中没有与问题相关的内容，请如实告知，再结合你自己的知识回答：\n\n"
             + context_text
         )
-    api_msgs += st.session_state.messages
+    if tools_for_call is not None:
+        api_msgs[0]["content"] += build_tools_directive()
+    api_msgs += [{"role": m["role"], "content": m["content"]}
+                 for m in st.session_state.messages]
+    if tools_for_call is not None and has_tool_denial(api_msgs):
+        api_msgs.append({"role": "assistant", "content": build_tools_ack()})
     api_msgs = trim_context_messages(api_msgs)
 
     with st.chat_message("assistant", avatar="🤖"):
         res_placeholder = st.empty()
         tool_placeholder = st.empty()
-
-        # 判断是否启用工具调用（当前模型不支持时自动跳过，如 deepseek-reasoner）
-        tools_for_call = None
-        model_supports_tools = True
-        if MODELS_AVAILABLE:
-            model_supports_tools = get_model_config(
-                st.session_state.current_model,
-                provider_key=st.session_state.provider
-            )["supports_tools"]
-        if (TOOLS_AVAILABLE and st.session_state.tools_enabled and model_supports_tools):
-            tools_for_call = get_available_tools()
 
         full_response = ""
         tools_used = []
@@ -1648,8 +1811,25 @@ if process_msg and process_msg.strip():
         "reasoning": reasoning_text,
     })
     if st.session_state.conversations:
-        st.session_state.conversations[st.session_state.current_conversation_index][
-            "messages"] = st.session_state.messages.copy()
+        conv_idx = st.session_state.current_conversation_index
+        if 0 <= conv_idx < len(st.session_state.conversations):
+            st.session_state.conversations[conv_idx]["messages"] = st.session_state.messages.copy()
+        else:
+            # 防御：索引越界时只记录日志，不崩溃（正常路径不会走到这里）
+            logger.error("当前对话索引 %s 越界（共 %d 条），跳过消息同步",
+                         conv_idx, len(st.session_state.conversations))
     save_session_to_file()
 
 st.divider()
+
+# ====================== 本地启动入口（仅 `python 06.py` 时生效） ======================
+# ⚠️ 不能用 `if __name__ == "__main__"` 单独判断：Streamlit 执行脚本时
+# __name__ 同样是 "__main__"（见 streamlit 源码 script_runner.py 的官方注释），
+# 该块会在**每次 rerun** 时重复执行，导致每次点击都额外启动一个
+# streamlit 子进程。必须再判断当前是否处于 Streamlit 运行环境：
+# 有 ScriptRunContext 说明是 `streamlit run` 启动的，跳过本块。
+if __name__ == "__main__":
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    if get_script_run_ctx() is None:  # 无 Streamlit 运行上下文 = 纯 python 启动
+        import os
+        os.system("streamlit run 06.py --server.headless true")
