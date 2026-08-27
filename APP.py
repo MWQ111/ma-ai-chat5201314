@@ -20,7 +20,7 @@ logger = logging.getLogger("ai_chat")
 
 # ====================== 环境变量加载 ======================
 # 使用 find_dotenv(usecwd=True) 定位当前工作目录下的 .env 文件
-# （以 `streamlit run 06.py` 启动时工作目录即项目根目录，比默认的
+# （以 `streamlit run APP.py` 启动时工作目录即项目根目录，比默认的
 # 按调用栈向上查找更可靠；文件不存在时静默跳过）。
 # 必须放在功能模块导入之前：cache.py 等在导入时会读取环境变量。
 try:
@@ -75,6 +75,14 @@ try:
     TOOLS_AVAILABLE = True
 except ImportError:
     TOOLS_AVAILABLE = False
+
+# ====================== LangGraph Agent 模块导入 ======================
+# Agent 依赖 langgraph / langchain-openai；未安装时自动降级为普通工具循环模式
+try:
+    from modules.agent import run_agent
+    AGENT_AVAILABLE = True
+except ImportError:
+    AGENT_AVAILABLE = False
 
 # ====================== 缓存模块导入 ======================
 try:
@@ -181,7 +189,9 @@ def save_session_to_file() -> None:
             "max_tokens": st.session_state.max_tokens,
             "current_conversation_index": st.session_state.current_conversation_index,
             "provider": st.session_state.get("provider", "deepseek"),
-            "current_model": st.session_state.get("current_model", "deepseek-chat")
+            "current_model": st.session_state.get("current_model", "deepseek-chat"),
+            "agent_mode_enabled": st.session_state.get("agent_mode_enabled", False),
+            "agent_max_steps": st.session_state.get("agent_max_steps", 5),
         }
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -307,6 +317,17 @@ def init_session_state() -> None:
 
     if "cache_enabled" not in st.session_state:
         st.session_state.cache_enabled = True
+
+    # ===== Agent 模式（LangGraph 规划 + 反思 + 自主结束，需先开启工具调用） =====
+    if "agent_mode_enabled" not in st.session_state:
+        st.session_state.agent_mode_enabled = (
+            bool(cache_data.get("agent_mode_enabled", False)) if cache_data else False
+        )
+
+    if "agent_max_steps" not in st.session_state:
+        st.session_state.agent_max_steps = (
+            int(cache_data.get("agent_max_steps", 5)) if cache_data else 5
+        )
 
     # 联动约束兜底：缓存开启时 RAG 与工具调用必须关闭。
     # 正常交互由 on_change 回调维护，这里兜底处理默认值冲突与旧版持久化数据。
@@ -1183,10 +1204,11 @@ def _render_legacy_api_config() -> None:
 # Streamlit 的 on_change 回调先于 session_state 更新执行：回调内读到的
 # 是切换前的旧值，因此「旧值为 False」即表示用户本次操作是「开启」。
 def _on_cache_enabled_change() -> None:
-    """缓存开关联动：开启缓存时自动关闭 RAG 与工具调用"""
+    """缓存开关联动：开启缓存时自动关闭 RAG、工具调用与 Agent 模式"""
     if not st.session_state.cache_enabled:  # 旧值为 False → 本次为开启
         st.session_state.rag_enabled = False
         st.session_state.tools_enabled = False
+        st.session_state.agent_mode_enabled = False
 
 
 def _on_rag_enabled_change() -> None:
@@ -1196,9 +1218,11 @@ def _on_rag_enabled_change() -> None:
 
 
 def _on_tools_enabled_change() -> None:
-    """工具开关联动：开启工具调用时自动关闭缓存（RAG 与工具调用不互斥）"""
-    if not st.session_state.tools_enabled:
+    """工具开关联动：开启工具调用时自动关闭缓存；关闭工具时同步关闭 Agent 模式"""
+    if not st.session_state.tools_enabled:  # 旧值为 False → 本次为开启
         st.session_state.cache_enabled = False
+    else:  # 本次为关闭：Agent 模式依赖工具调用，一并关闭
+        st.session_state.agent_mode_enabled = False
 
 
 def _delete_conversation(idx: int) -> None:
@@ -1430,6 +1454,22 @@ def render_sidebar() -> None:
                             f"⚠️ 当前模型 {st.session_state.current_model} 标记为不支持工具调用："
                             "提问时仍会先尝试，请求失败后自动降级并在回答中明确提示"
                         )
+
+                # Agent 模式（LangGraph）：在工具调用之上提供规划/反思/自主结束，
+                # 替代固定 3 轮的工具循环；依赖工具开关，关闭工具时自动关闭
+                if AGENT_AVAILABLE:
+                    st.toggle("🧠 Agent 模式（规划 + 反思）", key="agent_mode_enabled",
+                              disabled=not st.session_state.tools_enabled,
+                              help="开启后使用 LangGraph Agent 替代固定 3 轮的工具循环："
+                                   "AI 自主规划工具调用步骤、反思工具结果，并自主决定何时结束。"
+                                   "需先开启「启用工具调用」。")
+                    if st.session_state.agent_mode_enabled:
+                        st.slider("最大规划步数", 1, 10,
+                                  value=st.session_state.agent_max_steps,
+                                  key="agent_max_steps",
+                                  help="Agent 最多进行多少轮模型决策；达到上限时返回已收集的信息")
+                else:
+                    st.caption("⚠️ LangGraph Agent 未安装（pip install langgraph langchain-openai）")
 
         # 缓存设置（Redis）
         with st.expander("📦 缓存设置"):
@@ -1778,9 +1818,21 @@ if process_msg and process_msg.strip():
                 st.caption("📦 来自缓存")
 
         if not cache_hit:
-            full_response, tools_used, err, reasoning_text = run_tool_loop(
-                api_msgs, res_placeholder, tool_placeholder, tools_for_call
-            )
+            # Agent 模式（LangGraph）：规划 + 反思 + 自主结束，替代固定轮数的工具循环；
+            # 仅在 Agent 模块可用、开关打开且启用了工具时生效，否则回退普通模式
+            if (AGENT_AVAILABLE and st.session_state.agent_mode_enabled
+                    and tools_for_call is not None):
+                full_response, tools_used, err, reasoning_text = run_agent(
+                    api_msgs,
+                    content_placeholder=res_placeholder,
+                    tool_placeholder=tool_placeholder,
+                    tools=tools_for_call,
+                    max_steps=st.session_state.agent_max_steps,
+                )
+            else:
+                full_response, tools_used, err, reasoning_text = run_tool_loop(
+                    api_msgs, res_placeholder, tool_placeholder, tools_for_call
+                )
             if err:
                 if full_response:
                     # 已收到部分内容：保留内容并附上中断提示，而不是覆盖掉
@@ -1823,7 +1875,7 @@ if process_msg and process_msg.strip():
 st.divider()
 
 
-# ====================== 本地启动入口（仅 `python 06.py` 时生效） ======================
+# ====================== 本地启动入口（仅 `python APP.py` 时生效） ======================
 # ⚠️ 不能用 `if __name__ == "__main__"` 单独判断：Streamlit 执行脚本时
 # __name__ 同样是 "__main__"（见 streamlit 源码 script_runner.py 的官方注释），
 # 该块会在**每次 rerun** 时重复执行，导致每次点击都额外启动一个
@@ -1833,5 +1885,5 @@ if __name__ == "__main__":
     from streamlit.runtime.scriptrunner import get_script_run_ctx
     if get_script_run_ctx() is None:  # 无 Streamlit 运行上下文 = 纯 python 启动
         import os
-        os.system("streamlit run 06.py --server.headless true")
+        os.system("streamlit run APP.py --server.headless true")
 

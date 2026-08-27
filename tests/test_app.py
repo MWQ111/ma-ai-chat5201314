@@ -1,4 +1,4 @@
-"""06.py 应用级集成测试（Streamlit AppTest）
+"""APP.py 应用级集成测试（Streamlit AppTest）
 
 覆盖：深浅双模式渲染无异常、对话搜索过滤、消息长度拦截、
 会话原子写入（版本号）、损坏会话文件降级。
@@ -11,7 +11,7 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-APP_FILE = PROJECT_ROOT / "06.py"
+APP_FILE = PROJECT_ROOT / "APP.py"
 SESSION_FILE = PROJECT_ROOT / "session_data" / "session_cache.json"
 
 

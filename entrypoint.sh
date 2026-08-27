@@ -17,7 +17,7 @@ echo "✅ 数据目录就绪（session_data / chroma_db）"
 
 PORT="${PORT:-8501}"
 echo "==> 启动 Streamlit 应用（端口 ${PORT}）..."
-exec streamlit run 06.py \
+exec streamlit run APP.py \
     --server.address 0.0.0.0 \
     --server.port "${PORT}" \
     --server.headless true \

@@ -7,28 +7,74 @@
 DeepSeek / OpenAI 等模型均可直接使用。
 
 注意事项：
-- 网络搜索依赖 ddgs 库（DuckDuckGo，免 API 密钥），未安装时自动从工具列表剔除
+- 网络搜索使用 Tavily API（需在 .env 中配置 TAVILY_API_KEY），Tavily 失败时
+  自动降级到备用源 pixserp（需配置 PIXSERP_API_KEY）
 - deepseek-chat / deepseek-reasoner 均已实测支持工具调用；个别不支持的模型由
   主程序先尝试、失败后在回答中明确提示降级（绝不静默跳过）
 - 数学计算使用 AST 白名单解析，杜绝 eval 注入风险
 """
 
 import ast
+import logging
 import math
 import operator
+import os
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# 网络搜索库：优先新版 ddgs，兼容旧版 duckduckgo_search
+# 网络搜索：Tavily API（API Key 从环境变量 TAVILY_API_KEY 读取；
+# 主程序启动时已通过 load_dotenv 加载 .env，因此这里按调用时懒加载客户端）
 try:
-    from ddgs import DDGS
+    from tavily import TavilyClient
 except ImportError:
+    TavilyClient = None
+
+# pixserp 备用搜索源走 HTTP 接口；requests 是 streamlit 的既有依赖，
+# 个别环境缺失时降级为「备用源不可用」（主源 Tavily 不受影响）
+try:
+    import requests
+except ImportError:
+    requests = None
+
+
+# ====================== 搜索内部缓存（Redis） ======================
+# search_web 工具的内部缓存：与全局「回答缓存」（cache_enabled 开关）完全独立，
+# 不受该开关与互斥逻辑影响；Redis 不可用时自动降级为直接调用 Tavily API。
+# 复用 modules/cache.py 的 Redis 连接（同一份 HOST/PORT/PASSWORD 配置与
+# 可用性冷却机制），此处不重复创建连接。
+logger = logging.getLogger("ai_chat.tools")
+SEARCH_CACHE_TTL = int(os.environ.get("SEARCH_CACHE_TTL", 600))  # 搜索缓存过期秒数，默认 600
+
+try:
+    from modules.cache import (
+        is_redis_available as _redis_available,
+        _get_client as _get_redis_client,
+    )
+except ImportError:
+    # 缓存模块缺失时整体降级：搜索直接走 Tavily API
+    _redis_available = None
+    _get_redis_client = None
+
+
+def _search_cache_get(key):
+    """从 Redis 读取搜索缓存；Redis 不可用或读取失败返回 None（静默降级）"""
+    if _redis_available is None or not _redis_available():
+        return None
     try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        DDGS = None
-DDGS_AVAILABLE = DDGS is not None
+        return _get_redis_client().get(key)
+    except Exception:
+        return None
+
+
+def _search_cache_set(key, value):
+    """写入搜索缓存；Redis 不可用或写入失败静默跳过（不影响搜索主流程）"""
+    if _redis_available is None or not _redis_available():
+        return
+    try:
+        _get_redis_client().setex(key, SEARCH_CACHE_TTL, value)
+    except Exception:
+        pass
 
 
 # ====================== 工具实现函数 ======================
@@ -158,31 +204,137 @@ def calculate(expression):
         return f"计算错误：计算失败（{e}）"
 
 
+# ====================== 备用搜索源：pixserp ======================
+# pixserp 没有独立的 REST 搜索端点，走 OpenAI 兼容的 chat/completions 接口
+# （实测：POST {base}/chat/completions，模型 pixserp-fast，响应的
+# message.citations 中含 title/url/snippet 字段）。地址与模型均可通过
+# 环境变量覆盖，密钥绝不硬编码。
+PIXSERP_BASE_URL = os.environ.get("PIXSERP_BASE_URL", "https://pixserp.com/api/v1").rstrip("/")
+PIXSERP_MODEL = os.environ.get("PIXSERP_MODEL", "pixserp-fast")
+PIXSERP_TIMEOUT = int(os.environ.get("PIXSERP_TIMEOUT", 30))  # 请求超时秒数
+
+
+def _get_tavily_client():
+    """懒加载 Tavily 客户端（每次搜索时创建，保证 .env 已加载后再读取密钥）
+
+    Returns:
+        tuple: (TavilyClient 或 None, 错误说明或 None)；出错时客户端为 None
+    """
+    if TavilyClient is None:
+        return None, "错误：网络搜索不可用（未安装 tavily-python，可执行 pip install tavily-python）"
+    api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        return None, "错误：网络搜索未配置 TAVILY_API_KEY（请在项目根目录 .env 中设置）"
+    return TavilyClient(api_key=api_key), None
+
+
+def _search_with_tavily(query, max_results):
+    """调用 Tavily 搜索（主源），成功返回格式化结果行列表，失败抛异常
+
+    Returns:
+        list[str]: 每条结果一行「标题/链接/摘要」文本；空列表表示无结果
+    """
+    client, err = _get_tavily_client()
+    if err:
+        raise RuntimeError(err)
+    # Tavily 支持 search_depth=basic/advanced；basic 速度快、消耗低，够用
+    response = client.search(query=query, max_results=max_results, search_depth="basic", timeout=30)
+    results = response.get("results", []) if isinstance(response, dict) else []
+    return [
+        f"标题：{r.get('title', '')}\n链接：{r.get('url', '')}\n摘要：{r.get('content', '')}"
+        for r in results
+    ]
+
+
+def _search_with_pixserp(query, max_results):
+    """调用 pixserp 搜索（备用源），成功返回格式化结果行列表，失败抛异常
+
+    走 OpenAI 兼容接口：POST {PIXSERP_BASE_URL}/chat/completions，Bearer 认证；
+    响应的 message.content 为直接答案，message.citations 提供来源引用
+    （title/url/snippet 字段），两者拼成与 Tavily 一致的文本格式。
+
+    Returns:
+        list[str]: 「答案」+ 每条引用一行「标题/链接/摘要」文本；空列表表示无结果
+    """
+    if requests is None:
+        raise RuntimeError("错误：备用搜索源不可用（未安装 requests，可执行 pip install requests）")
+    api_key = os.environ.get("PIXSERP_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("错误：备用搜索源未配置 PIXSERP_API_KEY（请在项目根目录 .env 中设置）")
+    resp = requests.post(
+        f"{PIXSERP_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": PIXSERP_MODEL,
+            "messages": [{"role": "user", "content": query}],
+            "max_tokens": 800,
+        },
+        timeout=PIXSERP_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    choices = data.get("choices") or []
+    message = choices[0].get("message", {}) if choices else {}
+    content = (message.get("content") or "").strip()
+    citations = message.get("citations") or []
+    lines = []
+    if content:
+        lines.append(f"答案：{content}")
+    for c in citations[:max_results]:
+        lines.append(f"标题：{c.get('title', '')}\n链接：{c.get('url', '')}\n摘要：{c.get('snippet', '')}")
+    return lines
+
+
 def search_web(query, max_results=5):
-    """使用 DuckDuckGo 搜索网络并返回结果摘要（免 API 密钥）
+    """使用 Tavily API 搜索网络并返回结果摘要（带 Redis 内部缓存）
+
+    搜索链路：Tavily（主源）→ 失败自动降级 pixserp（备用源）→ 两个都失败
+    返回友好错误。缓存说明：键格式 search:{query}:{max_results}，过期时间
+    SEARCH_CACHE_TTL（默认 600 秒）；Redis 不可用时自动降级为直接调用搜索
+    API，不影响搜索。主源或备用源的成功结果都写入同一缓存。
 
     Args:
         query: 搜索关键词
         max_results: 最多返回的结果条数，默认 5（上限 10）
 
     Returns:
-        str: 搜索结果文本（标题+链接+摘要）；服务不可用或失败时返回错误说明
+        str: 搜索结果文本（标题+链接+摘要）；两个源都不可用时返回错误说明
     """
-    if not DDGS_AVAILABLE:
-        return "错误：网络搜索不可用（未安装 ddgs 库，可执行 pip install ddgs）"
     try:
         max_results = max(1, min(int(max_results), 10))
-        results = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=max_results):
-                results.append(
-                    f"标题：{r.get('title', '')}\n链接：{r.get('href', '')}\n摘要：{r.get('body', '')}"
-                )
-        if not results:
-            return f"未找到与「{query}」相关的结果"
-        return "\n\n".join(results)
+    except (TypeError, ValueError):
+        max_results = 5  # 参数异常时回退默认值，避免整次搜索失败
+
+    # ① 先查缓存：命中直接返回，完全不调用搜索 API
+    cache_key = f"search:{query}:{max_results}"
+    cached = _search_cache_get(cache_key)
+    if cached:
+        logger.info("搜索缓存命中：%s", cache_key)
+        return cached
+    logger.info("搜索缓存未命中：%s", cache_key)
+
+    # ② 主源 Tavily
+    try:
+        lines = _search_with_tavily(query, max_results)
+        logger.info("Tavily 搜索成功：%s（%d 条结果）", cache_key, len(lines))
     except Exception as e:
-        return f"错误：搜索失败（{e}）"
+        # ③ Tavily 失败（超时/额度用完/返回错误等）：自动切换到备用源 pixserp
+        logger.warning("Tavily 搜索失败：%s（%s），切换到备用源 pixserp", cache_key, e)
+        try:
+            lines = _search_with_pixserp(query, max_results)
+            logger.info("pixserp 搜索成功：%s（%d 条结果）", cache_key, len(lines))
+        except Exception as e2:
+            logger.error("pixserp 搜索也失败：%s（%s）", cache_key, e2)
+            return (f"❌ 网络搜索失败：主搜索源 Tavily 与备用源 pixserp 均不可用，请稍后重试。"
+                    f"Tavily 错误：{e}；pixserp 错误：{e2}。")
+
+    if not lines:
+        return f"未找到与「{query}」相关的结果"
+
+    # ④ 成功结果写入缓存（仅缓存成功结果；写入失败静默跳过）
+    result_text = "\n\n".join(lines)
+    _search_cache_set(cache_key, result_text)
+    return result_text
 
 
 # ====================== 工具定义（OpenAI 兼容协议） ======================
@@ -221,7 +373,7 @@ TOOLS = [
     },
 ]
 
-# 网络搜索工具（ddgs 不可用时不会注册）
+# 网络搜索工具（Tavily 主源 + pixserp 备用，始终注册）
 SEARCH_TOOL = {
     "type": "function",
     "function": {
@@ -325,15 +477,12 @@ def build_tools_ack():
 
 # ====================== 对外接口 ======================
 def get_available_tools():
-    """获取当前可用的工具定义列表（网络搜索依赖 ddgs，未安装时自动剔除）
+    """获取当前可用的工具定义列表（时间 / 计算 / Tavily 网络搜索）
 
     Returns:
         list[dict]: OpenAI 兼容的工具定义列表
     """
-    tools = list(TOOLS)
-    if DDGS_AVAILABLE:
-        tools.append(SEARCH_TOOL)
-    return tools
+    return TOOLS + [SEARCH_TOOL]
 
 
 def get_tool_names():
@@ -342,10 +491,7 @@ def get_tool_names():
     Returns:
         list[str]: 工具中文名列表
     """
-    names = ["⏰ 获取当前时间", "🧮 数学计算"]
-    if DDGS_AVAILABLE:
-        names.append("🌐 网络搜索")
-    return names
+    return ["⏰ 获取当前时间", "🧮 数学计算", "🌐 网络搜索"]
 
 
 def execute_tool(name, arguments):

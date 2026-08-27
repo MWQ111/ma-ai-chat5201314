@@ -11,5 +11,9 @@ langchain-text-splitters==1.1.2
 pypdf==6.16.1
 
 # ===== 工具调用 / 缓存 =====
-ddgs==9.15.0
+tavily-python==0.8.0
 redis==8.1.0
+
+# ===== Agent（LangGraph：规划 / 反思 / 自主结束）=====
+langgraph==1.2.11
+langchain-openai==1.6.0
