@@ -22,7 +22,7 @@ LangGraph Agent 模块
   达到 max_steps 上限时返回已收集的信息并提示。
 
 设计要点：
-- 不重写工具层：工具定义与执行完全复用 modules/tools.py 的
+- 不重写工具层：工具定义与执行完全复用 core/tools.py 的
   get_available_tools / execute_tool；
 - 模型适配：ChatOpenAI 统一接口（DeepSeek / OpenAI / Ollama 均为 OpenAI
   兼容协议），配置从 st.session_state 读取（provider / current_model /
@@ -42,7 +42,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from modules.tools import execute_tool
+from core.tools import execute_tool
 
 logger = logging.getLogger("ai_chat.agent")
 
@@ -50,7 +50,7 @@ logger = logging.getLogger("ai_chat.agent")
 # 默认最大规划步数（可用环境变量 AGENT_MAX_STEPS 覆盖，界面侧边栏可再调整）
 DEFAULT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", 5))
 # 工具结果截断上限：与普通模式 AppConfig.MAX_TOOL_RESULT_CHARS 保持一致。
-# 注意 agent.py 不能 import APP.py（APP.py 导入本模块，会循环导入），
+# 注意 agent.py 不能 import app.py（app.py 导入本模块，会循环导入），
 # 因此此处独立读取环境变量（同名键可由部署方统一配置）。
 AGENT_MAX_TOOL_RESULT_CHARS = int(os.environ.get("AGENT_MAX_TOOL_RESULT_CHARS", 4000))
 
@@ -84,7 +84,7 @@ def _resolve_llm_config(config: dict | None) -> dict:
 
     优先使用显式传入的 config（测试 / 调用方覆盖用）；否则从 st.session_state
     读取多模型配置（provider / current_model / temperature / api_keys /
-    base_urls），会话状态为空时回退 modules/models.py 的模型默认配置；
+    base_urls），会话状态为空时回退 core/models.py 的模型默认配置；
     非 Streamlit 环境（单元测试 / CLI）回退环境变量，保证模块可独立使用。
 
     Returns:
@@ -110,7 +110,7 @@ def _resolve_llm_config(config: dict | None) -> dict:
         max_tokens = ss.get("max_tokens")
         # 与主程序 create_ai_client 一致：会话状态为空时回退模型配置 / 环境变量
         try:
-            from modules.models import get_model_config
+            from core.models import get_model_config
             cfg = get_model_config(model, provider_key=provider)
         except Exception:
             cfg = {}
@@ -187,7 +187,7 @@ def call_model_node(state: AgentState) -> dict:
 def tool_node(state: AgentState) -> dict:
     """工具执行节点：执行模型请求的工具调用，结果以 ToolMessage 回传
 
-    复用 modules.tools.execute_tool（与普通模式同一套实现，不重写工具层）。
+    复用 core.tools.execute_tool（与普通模式同一套实现，不重写工具层）。
     """
     last = state["messages"][-1]
     if not isinstance(last, AIMessage) or not last.tool_calls:

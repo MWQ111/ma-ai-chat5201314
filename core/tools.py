@@ -41,13 +41,13 @@ except ImportError:
 # ====================== 搜索内部缓存（Redis） ======================
 # search_web 工具的内部缓存：与全局「回答缓存」（cache_enabled 开关）完全独立，
 # 不受该开关与互斥逻辑影响；Redis 不可用时自动降级为直接调用 Tavily API。
-# 复用 modules/cache.py 的 Redis 连接（同一份 HOST/PORT/PASSWORD 配置与
+# 复用 core/cache.py 的 Redis 连接（同一份 HOST/PORT/PASSWORD 配置与
 # 可用性冷却机制），此处不重复创建连接。
 logger = logging.getLogger("ai_chat.tools")
 SEARCH_CACHE_TTL = int(os.environ.get("SEARCH_CACHE_TTL", 600))  # 搜索缓存过期秒数，默认 600
 
 try:
-    from modules.cache import (
+    from core.cache import (
         is_redis_available as _redis_available,
         _get_client as _get_redis_client,
     )

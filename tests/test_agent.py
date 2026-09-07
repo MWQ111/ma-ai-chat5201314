@@ -1,5 +1,5 @@
 """
-modules/agent 单元测试：LangGraph Agent 的规划 / 反思 / 自主结束流程
+core/agent 单元测试：LangGraph Agent 的规划 / 反思 / 自主结束流程
 
 使用 FakeLLM 替换 ChatOpenAI（monkeypatch _build_llm），全部用例
 不触发真实 API 调用；工具执行走真实的 execute_tool（本地计算）。
@@ -9,9 +9,9 @@ import copy
 
 from langchain_core.messages import AIMessage
 
-from modules import agent as agent_module
-from modules.agent import AGENT_SYSTEM_DIRECTIVE, run_agent
-from modules.tools import get_available_tools
+from core import agent as agent_module
+from core.agent import AGENT_SYSTEM_DIRECTIVE, run_agent
+from core.tools import get_available_tools
 
 
 class FakeLLM:

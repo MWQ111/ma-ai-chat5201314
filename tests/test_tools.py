@@ -1,8 +1,8 @@
-"""modules/tools 单元测试：安全计算器、时间工具与工具执行器"""
+"""core/tools 单元测试：安全计算器、时间工具与工具执行器"""
 
 import pytest
 
-from modules.tools import (
+from core.tools import (
     _preprocess_expression,
     build_tools_ack,
     build_tools_directive,

@@ -1,6 +1,6 @@
-"""modules/cache 单元测试：缓存键规则 + 无 Redis 时的静默降级"""
+"""core/cache 单元测试：缓存键规则 + 无 Redis 时的静默降级"""
 
-from modules.cache import (
+from core.cache import (
     _make_key,
     get_cache_status,
     get_cached_response,

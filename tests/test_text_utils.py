@@ -1,6 +1,6 @@
-"""modules/text_utils 单元测试：Token 估算"""
+"""core/text_utils 单元测试：Token 估算"""
 
-from modules.text_utils import estimate_tokens
+from core.text_utils import estimate_tokens
 
 
 def test_empty_text():

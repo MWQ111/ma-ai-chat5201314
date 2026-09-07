@@ -12,7 +12,7 @@ __pycache__/
 .venv/
 venv/
 
-# 教程/历史脚本（仅 06.py 与 modules/ 是应用所需）
+# 教程/历史脚本（仅 app.py、core/、ui/ 是应用所需）
 01.*.py
 02.*.py
 03.*.py

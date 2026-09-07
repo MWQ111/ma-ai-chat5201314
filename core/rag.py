@@ -29,7 +29,7 @@ import chromadb
 from chromadb.utils import embedding_functions
 
 # ====================== 常量配置 ======================
-# 项目根目录（本模块位于 modules/ 下，父目录即项目根目录）
+# 项目根目录（本模块位于 core/ 下，父目录即项目根目录）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHROMA_DIR = os.path.join(BASE_DIR, "chroma_db")   # 向量库本地持久化目录
 COLLECTION_NAME = "documents"                      # 向量集合名称

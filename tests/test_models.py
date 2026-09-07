@@ -1,11 +1,11 @@
-"""modules/models 单元测试：多模型配置与思考过程提取（纯函数，不依赖网络）"""
+"""core/models 单元测试：多模型配置与思考过程提取（纯函数，不依赖网络）"""
 
 import os
 from types import SimpleNamespace
 
 import pytest
 
-from modules.models import (
+from core.models import (
     extract_reasoning,
     find_provider_of_model,
     get_model_config,
