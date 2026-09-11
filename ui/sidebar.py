@@ -43,7 +43,7 @@ try:
 except ImportError:
     pass
 try:
-    from core.cache import CACHE_TTL, clear_cache, get_cache_status
+    from core.cache import CACHE_TTL, clear_cache, get_cache_status, update_system_prompt_hash
 except ImportError:
     pass
 try:
@@ -296,6 +296,9 @@ def render_sidebar() -> None:
             )
             if st.button("💾 保存提示词", use_container_width=True):
                 st.session_state.system_prompt = new_prompt
+                if CACHE_AVAILABLE:
+                    # 提示词变了，缓存键因子随之变化，旧缓存自然失效
+                    update_system_prompt_hash(new_prompt)
                 save_session_to_file(st.session_state)
                 st.success("提示词更新成功！")
                 st.rerun()

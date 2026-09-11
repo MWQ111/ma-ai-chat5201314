@@ -28,6 +28,8 @@ from langchain_core.documents import Document
 import chromadb
 from chromadb.utils import embedding_functions
 
+from core.cache import bump_rag_version
+
 # ====================== 常量配置 ======================
 # 项目根目录（本模块位于 core/ 下，父目录即项目根目录）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -263,6 +265,7 @@ def add_to_vectorstore(docs):
         documents=[d.page_content for d in docs],
         metadatas=[d.metadata for d in docs],
     )
+    bump_rag_version()  # 知识库内容变化：缓存键版本 +1，旧缓存自然失效
     return len(docs)
 
 
@@ -359,6 +362,7 @@ def delete_document(doc_id):
         return 0
     # 第二步：按 ID 精确删除
     collection.delete(ids=ids)
+    bump_rag_version()  # 知识库内容变化：缓存键版本 +1，旧缓存自然失效
     return len(ids)
 
 
@@ -378,6 +382,7 @@ def clear_all():
         _get_client().delete_collection(COLLECTION_NAME)
     except Exception:
         pass  # 集合本来就不存在时无需处理
+    bump_rag_version()  # 知识库内容变化：缓存键版本 +1，旧缓存自然失效
     global _collection, _provider, _status_msg
     _collection = None  # 重置单例，让下次访问重新创建集合
     _provider = None

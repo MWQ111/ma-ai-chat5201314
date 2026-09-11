@@ -52,7 +52,7 @@ from ui.sidebar import render_sidebar  # noqa: E402
 
 # ====================== 页面全局配置 ======================
 st.set_page_config(
-    page_title="马氏AI会话智能体",
+    page_title="AI会话智能体",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -63,7 +63,9 @@ st.set_page_config(
     }
 )
 
-st.logo("./resources/gdutlogo.png")
+# 用基于 __file__ 的绝对路径：st.logo 会用相对路径读文件，若工作目录不是项目根
+# （如从其他目录运行测试）会加载失败，此处保证任何 cwd 下都能正确加载。
+st.logo(os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "gdutlogo.png"))
 
 # ====================== 初始化与组装 ======================
 init_session_state(st.session_state)

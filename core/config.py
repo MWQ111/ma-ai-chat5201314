@@ -1,11 +1,17 @@
 """应用级常量配置（不依赖 Streamlit）：所有可调参数集中在此，便于统一维护"""
 
+import os
+
+# 项目根目录（core/ 的上一级）：用绝对路径避免依赖当前工作目录，
+# 保证从任意 cwd 启动（如从其他目录运行测试）都会读写项目根下的 session_data/
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 class AppConfig:
     """应用级常量配置：所有可调参数集中在此，便于统一维护"""
 
     # ---- 会话持久化 ----
-    SESSION_FILE_DIR = "./session_data"        # 会话数据目录
+    SESSION_FILE_DIR = os.path.join(_BASE_DIR, "session_data")  # 会话数据目录（绝对路径）
     SESSION_FILE_NAME = "session_cache.json"   # 会话数据文件名
     SESSION_FILE_VERSION = 2                   # 会话文件格式版本号（结构变更时递增）
 
@@ -21,6 +27,9 @@ class AppConfig:
     STREAM_STALL_TIMEOUT = 30                  # 流式响应相邻数据块最大间隔（秒）
     MAX_TOOL_RESULT_CHARS = 4000               # 工具返回结果最大字符数
     MAX_UPLOAD_SIZE = 10 * 1024 * 1024         # 上传文件最大字节数（10MB）
+
+    # ---- 语义缓存 ----
+    SEMANTIC_CACHE_THRESHOLD = 0.95            # 语义缓存余弦相似度阈值（0~1，越大匹配越严格；按实测调优）
 
     # ---- 系统默认提示词 ----
     DEFAULT_SYSTEM_PROMPT = """你是一位可爱且专业的AI助理喔~。你的特点：
@@ -48,3 +57,4 @@ class AppConfig:
 DEFAULT_SYSTEM_PROMPT = AppConfig.DEFAULT_SYSTEM_PROMPT
 QUICK_QUESTIONS = AppConfig.QUICK_QUESTIONS
 MODEL_LIST = AppConfig.MODEL_LIST
+SEMANTIC_CACHE_THRESHOLD = AppConfig.SEMANTIC_CACHE_THRESHOLD

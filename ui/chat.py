@@ -28,7 +28,7 @@ try:
 except ImportError:
     pass
 try:
-    from core.cache import get_cached_response, set_cached_response
+    from core.cache import get_cached_response, set_cached_response, update_system_prompt_hash
 except ImportError:
     pass
 try:
@@ -59,7 +59,10 @@ def render_copy_button(content: str) -> None:
         bg, text_c, border, accent, hover = "#ffffff", "#5a6472", "#d8dde6", "#667eea", "#e9edf5"
     html = f"""
 <style>
-  body {{ margin: 0; background: transparent; font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans SC", "Microsoft YaHei", sans-serif; }}
+  body {{
+    margin: 0; background: transparent;
+    font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  }}
   .row {{ display: flex; justify-content: flex-end; align-items: center; gap: 8px; }}
   button {{
     border: 1px solid {border}; background: {bg}; color: {text_c};
@@ -277,6 +280,9 @@ def handle_user_message(process_msg: str) -> None:
         use_cache = (CACHE_AVAILABLE and st.session_state.cache_enabled
                      and not rag_sources and tools_for_call is None)
         if use_cache:
+            # 发送消息前按当前提示词刷新缓存键因子：提示词一旦修改，
+            # 旧缓存键立即失效，绝不会命中“旧提示词下的回答”
+            update_system_prompt_hash(st.session_state.system_prompt)
             # 缓存降级保护：Redis 异常时跳过缓存直接走 API，不影响正常对话
             try:
                 cached = get_cached_response(process_msg, model=st.session_state.current_model)

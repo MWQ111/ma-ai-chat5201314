@@ -1,10 +1,22 @@
 import json
+import os
 import threading
 import uuid
 
+# 先加载 .env 再导入 core：core/db.py 在导入时读取 DATABASE_URL 环境变量，
+# 与 app.py 的加载逻辑保持一致（文件不存在时静默跳过）
+try:
+    from dotenv import load_dotenv, find_dotenv
+    _dotenv_path = find_dotenv(usecwd=True, raise_error_if_not_found=False)
+    if _dotenv_path:
+        load_dotenv(_dotenv_path)
+    else:
+        load_dotenv()
+except Exception as e:
+    print(f"环境变量文件加载跳过：{e}")
+
 from flask import Flask, request, jsonify, Response, stream_with_context
 import streamlit as st
-import os
 
 from core.chat import call_ai_api_simple, call_ai_api_simple_stream
 from core.db import SessionDB
@@ -159,10 +171,28 @@ def get_conversations():
         return jsonify({"error": str(e)}), 500
 @app.route("/conversations/<int:conv_id>/messages", methods=["GET"])
 def get_messages(conv_id):
-    db = SessionDB()
-    result = db.get_messages(conv_id)
-    db.close()
-    return jsonify({"messages": result})
+    try:
+        db = SessionDB()
+        result = db.get_messages(conv_id)
+        db.close()
+        # ORM 对象无法被 Flask 直接序列化（jsonify 会抛错返回 500），
+        # 统一转成 dict 列表；字段口径与 /conversations 接口一致
+        data = [
+            {
+                "id": m.id,
+                "conversation_id": m.conversation_id,
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at,
+            }
+            for m in result
+        ]
+        return jsonify({"messages": data})
+    except Exception as e:
+        print("查询消息失败：", e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/conversations", methods=["POST"])
 def create_conversation():

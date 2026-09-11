@@ -1,6 +1,6 @@
 # 马氏AI会话智能体
 
-![CI](https://github.com/MWQ111/ma-ai-chat5201314/actions/workflows/ci.yml/badge.svg)
+![Tests](https://github.com/MWQ111/ma-ai-chat5201314/actions/workflows/ci.yml/badge.svg)
 
 **一句话定位**：基于 **LangGraph** 的多模型 AI 对话系统——Streamlit 交互界面 + Flask REST API，支持 Agent 自主规划、Function Calling 工具调用、RAG 私有知识库检索、多模型一键切换（DeepSeek / OpenAI / Ollama），Redis 缓存、MySQL 持久化与 Docker 一键部署。
 
@@ -20,7 +20,43 @@
 - **双入口**：Streamlit 图形界面 + Flask REST API（含可取消的流式接口）；
 - **Docker 一键部署**：docker-compose 编排应用 + Redis + ChromaDB。
 
-**工程理念**：贯穿全局的「优雅降级」——RAG、工具、缓存、Agent、MySQL 任一模块缺失或异常，应用照常运行。配套 46 个自动化测试与 GitHub Actions CI。
+**工程理念**：贯穿全局的「优雅降级」——RAG、工具、缓存、Agent、MySQL 任一模块缺失或异常，应用照常运行。配套 51 个自动化测试与 GitHub Actions CI。
+
+---
+
+## 🖼 项目总览
+
+下图展示项目的分层总览：**接入层**（Streamlit 界面 / Flask API）→ **业务逻辑层**（`core/`，对话核心、Agent、工具、RAG）→ **存储与外部服务**（大模型、MySQL、Redis、ChromaDB）。更细的对话数据流见下文「系统架构」。
+
+```mermaid
+flowchart TB
+    subgraph Client["接入层"]
+        UI["Streamlit 界面<br/>app.py"]
+        API["Flask REST API<br/>app_api.py"]
+    end
+    subgraph Core["业务逻辑层 core/"]
+        CHAT["对话核心<br/>chat.py"]
+        AGENT["LangGraph Agent<br/>agent.py"]
+        TOOLS["工具层<br/>tools.py"]
+        RAGM["RAG 检索<br/>rag.py"]
+    end
+    subgraph Infra["存储与外部服务"]
+        LLM["大模型<br/>DeepSeek / OpenAI / Ollama"]
+        DB["MySQL 存储<br/>不可用时回退 JSON"]
+        REDIS["Redis 缓存"]
+        CHROMA["ChromaDB 向量库"]
+    end
+    UI --> CHAT
+    API --> CHAT
+    CHAT --> AGENT
+    CHAT --> TOOLS
+    CHAT --> RAGM
+    CHAT --> LLM
+    AGENT --> TOOLS
+    RAGM --> CHROMA
+    CHAT --> REDIS
+    UI --> DB
+```
 
 ---
 
@@ -53,7 +89,7 @@
 | langchain-openai 1.6.0 | 模型统一接口 | ChatOpenAI 绑定工具定义 |
 | OpenAI SDK 2.37 | LLM 调用 | 兼容 DeepSeek / OpenAI / Ollama |
 | SQLAlchemy 2.x | ORM | MySQL 会话持久化（实测 2.0.52） |
-| MySQL 8.0 | 主存储 | 界面与 API 共用（连接串见 `core/db.py`，可改） |
+| MySQL 8.0 | 主存储 | 界面与 API 共用（连接串经 `DATABASE_URL` 环境变量配置，表缺失自动建表） |
 | ChromaDB 1.5.9 | 向量数据库 | RAG 文档检索 |
 | Redis 7.x | 缓存 | 全局回答缓存 + 搜索内部缓存 |
 | tavily-python 0.8 | 网络搜索主源 | 需配置 TAVILY_API_KEY |
@@ -142,9 +178,9 @@ pip install flask sqlalchemy pymysql
 cp .env.example .env
 # 编辑 .env，至少填入 DEEPSEEK_API_KEY（使用 Ollama 本地模型可跳过）
 
-# 6.（可选）配置 MySQL：在 core/db.py 顶部修改连接串
-#    DATABASE_URL = "mysql+pymysql://用户:密码@主机:3306/ma_ai_chat"
-#    并创建数据库 ma_ai_chat；未配置/连不上时自动回退本地 JSON，不影响启动
+# 6.（可选）配置 MySQL：在 .env 中设置 DATABASE_URL（见 .env.example）
+#    并创建数据库 ma_ai_chat（应用启动时自动建表，无需手动建表）；
+#    未配置/连不上时自动回退本地 JSON，不影响启动
 
 # 7.（可选）启动 Redis——不启动也能用，只是缓存功能自动降级
 docker run -d --name redis -p 6379:6379 redis:7-alpine --appendonly yes
@@ -170,6 +206,46 @@ docker compose up -d --build  # 一条命令启动应用 + Redis + ChromaDB
 
 ---
 
+## 📊 性能基准
+
+在 100 次请求（40% 重复提问）下的实测结果：
+
+| 指标 | 数值 |
+| --- | --- |
+| P50 延迟 | 0.90s |
+| P95 延迟 | 2.42s |
+| 缓存命中率 | 44.0% |
+
+**复现方式**：
+
+```bash
+python scripts/bench.py
+```
+
+---
+
+## 🧪 测试
+
+项目包含 **51 个自动化测试**，覆盖单元测试、Streamlit 集成测试（`AppTest`）和 MySQL 端到端测试。
+
+**复现方式**：
+
+```bash
+pytest -v
+```
+
+---
+
+## 🔎 RAG 评估
+
+评估 RAG 文档检索质量（命中率与相关性），运行方式：
+
+```bash
+python scripts/eval_rag.py
+```
+
+---
+
 ## ⚙️ 环境变量说明
 
 | 变量 | 说明 | 必填 |
@@ -181,6 +257,7 @@ docker compose up -d --build  # 一条命令启动应用 + Redis + ChromaDB
 | `EMBEDDING_PROVIDER` | RAG 嵌入方式：`auto` / `openai` / `local` | 否（默认 `auto`） |
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | 否（未配置时网络搜索不可用） |
 | `PIXSERP_API_KEY` | pixserp 备用搜索 API 密钥 | 否（Tavily 失败时自动切换） |
+| `DATABASE_URL` | MySQL 连接串（SQLAlchemy 格式，含账号密码） | 否（默认本地开发值，见 `.env.example`） |
 | `AGENT_MAX_STEPS` | Agent 默认最大规划步数（侧边栏可再调整） | 否（默认 `5`） |
 | `CACHE_TTL` | 全局回答缓存有效期（秒） | 否（默认 `3600`） |
 | `SEARCH_CACHE_TTL` | 搜索工具内部缓存有效期（秒） | 否（默认 `600`） |
@@ -189,7 +266,7 @@ docker compose up -d --build  # 一条命令启动应用 + Redis + ChromaDB
 | `CHROMA_HOST` / `CHROMA_PORT` | ChromaDB 服务器地址（Docker 部署自动注入） | 否（默认本地模式） |
 | `PORT` | 应用对外端口（Docker 部署） | 否（默认 `8501`） |
 
-> 密钥只从环境变量读取，绝不硬编码；所有密钥也可在启动后的「API 配置」界面中填写（仅保存在会话内存）。MySQL 连接串目前配置在 `core/db.py` 顶部（非环境变量），按需修改后重启生效。
+> 密钥只从环境变量读取，绝不硬编码；所有密钥也可在启动后的「API 配置」界面中填写（仅保存在会话内存）。MySQL 连接串通过 `DATABASE_URL` 环境变量配置（`.env`），首次连接时会自动创建缺失的数据表；修改后需重启应用生效。
 
 ---
 
@@ -292,7 +369,18 @@ ma-ai-chat5201314/
 │   ├── sidebar.py         # 侧边栏：API 配置 / 高级参数 / RAG 文档 / 工具与缓存 / 对话管理
 │   ├── chat.py            # 聊天界面：消息渲染 / 复制按钮 / 用户消息处理流程
 │   └── components.py      # 通用组件：全局主题 CSS 注入、toast 轻提示
-├── tests/                 # pytest 测试套件（46 个：单元 + Streamlit AppTest 集成）
+├── tests/                 # pytest 测试套件（51 个：单元 + Streamlit AppTest 集成 + MySQL E2E）
+│   ├── conftest.py        # 全局夹具：sys.path 修正 / .env 加载 / 会话文件备份恢复
+│   ├── test_models.py     # 多模型提供方配置单元测试
+│   ├── test_tools.py      # Function Calling 工具单元测试
+│   ├── test_text_utils.py # 纯文本工具单元测试
+│   ├── test_cache.py      # Redis 缓存测试
+│   ├── test_agent.py      # LangGraph Agent 测试
+│   ├── test_app.py        # Streamlit AppTest 集成测试
+│   └── test_e2e_mysql.py  # MySQL 端到端测试（不可用时自动跳过）
+├── scripts/               # 辅助脚本
+│   ├── bench.py           # 性能基准测试（延迟 / 缓存命中率）
+│   └── eval_rag.py        # RAG 检索效果评估
 ├── .github/workflows/
 │   └── ci.yml             # CI：ruff 规范检查 + pytest 自动测试
 ├── resources/

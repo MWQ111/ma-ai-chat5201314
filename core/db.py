@@ -1,30 +1,62 @@
 
 # core/db.py
 import logging
+import os
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine, Column, Integer, String, Text, TIMESTAMP, ForeignKey, func
+from sqlalchemy import create_engine, Column, Integer, String, Text, TIMESTAMP, ForeignKey, func, text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 logger = logging.getLogger("ai_chat.core.db")
 
 # 1. 连接 MySQL
-# 把 "你的密码" 改成你自己的 MySQL root 密码
-DATABASE_URL = "mysql+pymysql://root:123456mwq@localhost:3306/ma_ai_chat"
+# 连接串从环境变量 DATABASE_URL 读取；未配置时使用内置的本地开发默认值。
+# 真实密码不要硬编码进代码（历史版本曾硬编码并已进入 Git，故移除）：
+# 本地在 .env 中配置（见 .env.example），生产/CI 由部署环境注入。
+DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:123456@localhost:3306/ma_ai_chat")
 USER_ID = "default_user"
 engine = create_engine(DATABASE_URL, echo=False)
 
-# 检测 MySQL 是否可用（导入时探测一次；运行中故障由调用方捕获后走 JSON 降级）
-_db_available = False
-try:
-    with engine.connect() as conn:
-        _db_available = True
-except Exception as e:
-    logger.warning("MySQL 连接失败，应用将降级到本地 JSON 存储：%s", e)
+# 检测 MySQL 是否“可用且表已存在”：首次调用 db_available() 时执行探针查询，
+# 结果缓存（None=尚未探测）。之所以要探针查询而不是只测连接：连接成功但表
+# 不存在时，后续查询会抛异常被上层吞掉、误判为“库空”走 JSON 降级，界面却仍
+# 显示 MySQL，即“假降级”。运行中故障仍由调用方捕获后走 JSON 降级。
+_db_available: bool | None = None
+
+
+def _probe_db() -> bool:
+    """探针查询 conversations / messages 表；表缺失时自动建表后重探一次"""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1 FROM conversations LIMIT 1"))
+            conn.execute(text("SELECT 1 FROM messages LIMIT 1"))
+        return True
+    except ProgrammingError:
+        # 连接正常但表不存在（首次部署/表被误删）：自动建表（只补缺失的表）
+        try:
+            Base.metadata.create_all(engine)
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1 FROM conversations LIMIT 1"))
+            logger.info("MySQL 数据表缺失，已自动创建 conversations / messages 表")
+            return True
+        except Exception as e:
+            logger.warning("MySQL 自动建表失败，应用将降级到本地 JSON 存储：%s", e)
+            return False
+    except Exception as e:
+        logger.warning("MySQL 连接失败，应用将降级到本地 JSON 存储：%s", e)
+        return False
 
 
 def db_available() -> bool:
-    """MySQL 是否可用（False 时上层自动走 JSON 降级）"""
+    """MySQL 是否可用且数据表已存在（False 时上层自动走 JSON 降级）
+
+    探测结果缓存：连接失败/建表失败只探测一次，避免每次 rerun / API 请求
+    都反复等待连接超时拖慢界面；重启应用后会重新探测。
+    """
+    global _db_available
+    if _db_available is None:
+        _db_available = _probe_db()
     return _db_available
 
 

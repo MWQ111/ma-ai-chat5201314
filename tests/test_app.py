@@ -4,6 +4,9 @@
 会话原子写入（版本号）、损坏会话文件降级。
 所有用例均不触发真实 API 调用（长度拦截在发请求前 st.stop）。
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 from pathlib import Path
@@ -44,8 +47,10 @@ def test_light_mode_renders_without_exception():
 
 def test_conversation_search_filter():
     at = _load_app()
-    # 命中：默认对话名包含"默认"，不应出现未找到提示
-    at.text_input(key="conv_search").set_value("默认")
+    # 命中：搜索一个存储中真实存在的对话标题（"新标题"），不应出现未找到提示。
+    # 注意：会话列表来自 MySQL（不可用时回退本地 JSON），关键字必须与存储中的
+    # 真实标题一致，否则会因数据变化而误报失败
+    at.text_input(key="conv_search").set_value("新标题")
     at.run()
     assert not any("未找到匹配的对话" in c.value for c in at.caption)
     # 未命中：显示提示且不抛异常
@@ -65,12 +70,15 @@ def test_message_length_limit():
 
 
 def test_new_conversation_persisted_with_version():
-    """新建对话触发原子写入：带版本号、无 .tmp 残留、数量 +1"""
+    """新建对话触发原子写入：带版本号、无 .tmp 残留、新对话出现在文件中"""
     at = _load_app()
     before = 1
+    before_names = set()
     if SESSION_FILE.exists():
         with open(SESSION_FILE, encoding="utf-8") as f:
-            before = len(json.load(f).get("conversations", []))
+            conversations = json.load(f).get("conversations", [])
+            before = len(conversations)
+            before_names = {c.get("name") for c in conversations}
     for b in at.get("button"):
         if b.label == "➕ 新建":
             b.click()
@@ -80,8 +88,12 @@ def test_new_conversation_persisted_with_version():
     assert SESSION_FILE.exists()
     with open(SESSION_FILE, encoding="utf-8") as f:
         saved = json.load(f)
+    saved_conversations = saved.get("conversations", [])
     assert saved.get("version") == 2
-    assert len(saved.get("conversations", [])) == before + 1
+    # 应用启动会把 MySQL 中已有的会话并入 session_state（文件可能滞后于库），
+    # 因此只断言「数量不少于 +1」且「出现了一个新对话」，不做精确计数
+    assert len(saved_conversations) >= before + 1
+    assert before_names < {c.get("name") for c in saved_conversations}
     assert not Path(str(SESSION_FILE) + ".tmp").exists()
 
 
