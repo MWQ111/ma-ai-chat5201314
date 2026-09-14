@@ -64,7 +64,7 @@ flowchart TB
 
 - **Agent 自主决策（LangGraph 状态机）**：AI 自主决定调用哪些工具、反思工具结果是否足够、自主决定何时结束；达到最大规划步数时返回已收集信息并提示。可随时切回普通模式，两者互不影响。
 - **工具调用（Function Calling）**：内置获取当前时间（支持时区）、安全数学计算（支持 `^` 幂与 `√` 开方，AST 白名单解析杜绝 `eval` 注入）、网络搜索（Tavily 主源，失败自动降级 pixserp 备用源）。
-- **RAG 文档检索**：上传 PDF / TXT / Markdown 文档，自动切分并向量化存入 ChromaDB；提问时先检索相关片段再交给模型回答，支持 OpenAI 嵌入与本地嵌入双方案，自动兼容已有向量库。
+- **RAG 文档检索**：上传 PDF / TXT / Markdown 文档，自动切分并向量化存入 ChromaDB；提问时先检索相关片段再交给模型回答。默认使用 Ollama 多语言嵌入模型 bge-m3（中文语义区分度好），Ollama 不可用时自动回退 OpenAI / 本地内置模型，并自动兼容已有向量库。
 - **多模型切换**：统一适配 DeepSeek（deepseek-chat / deepseek-reasoner）、OpenAI（gpt-4o / gpt-4o-mini）与 Ollama 本地模型（动态拉取已安装模型），界面一键切换，各模型独立 temperature / max_tokens 参数自动套用。
 - **Redis 缓存**：全局回答缓存（相同问题直接命中，可开关）与搜索工具内部缓存（独立于全局开关）；Redis 不可用时静默降级，主流程不受影响。
 - **MySQL 存储（ORM + JSON 降级）**：会话与消息通过 SQLAlchemy ORM 持久化到 MySQL，UI 与 REST API 共用同一份数据；MySQL 不可用时自动降级到本地 JSON 文件，恢复后自动回迁。
@@ -91,6 +91,7 @@ flowchart TB
 | SQLAlchemy 2.x | ORM | MySQL 会话持久化（实测 2.0.52） |
 | MySQL 8.0 | 主存储 | 界面与 API 共用（连接串经 `DATABASE_URL` 环境变量配置，表缺失自动建表） |
 | ChromaDB 1.5.9 | 向量数据库 | RAG 文档检索 |
+| Ollama bge-m3 | 嵌入模型 | RAG 检索 + 语义缓存的默认嵌入（多语言，1024 维） |
 | Redis 7.x | 缓存 | 全局回答缓存 + 搜索内部缓存 |
 | tavily-python 0.8 | 网络搜索主源 | 需配置 TAVILY_API_KEY |
 | pixserp | 网络搜索备用源 | Tavily 失败时自动切换 |
@@ -152,7 +153,8 @@ flowchart LR
 - Python 3.10+
 - MySQL 8.0（可选，未启动时自动使用本地 JSON 存储）
 - Redis 7.x（可选，未启动时缓存功能自动降级）
-- （可选）Ollama 本地模型服务
+- （可选）Ollama 本地模型服务：既可作为对话模型，也是 RAG / 语义缓存的默认嵌入来源
+  （需 `ollama pull bge-m3`；未启动时嵌入自动回退 OpenAI / 本地内置模型）
 
 ### 方式一：本地运行
 
@@ -187,11 +189,15 @@ docker run -d --name redis -p 6379:6379 redis:7-alpine --appendonly yes
 # 或者只启动 compose 里的 Redis 服务：
 # docker compose up -d redis
 
-# 8. 启动界面
+# 8.（可选）启动 Ollama 并拉取嵌入模型——RAG / 语义缓存默认使用 bge-m3
+#    不启动也能用，只是嵌入自动回退 OpenAI（需密钥）或本地内置模型
+ollama pull bge-m3
+
+# 9. 启动界面
 streamlit run app.py
 # 浏览器打开 http://localhost:8501
 
-# 9.（可选）启动 REST API（另开一个终端）
+# 10.（可选）启动 REST API（另开一个终端）
 python app_api.py
 # API 监听 http://localhost:5000
 ```
@@ -220,6 +226,25 @@ docker compose up -d --build  # 一条命令启动应用 + Redis + ChromaDB
 
 ```bash
 python scripts/bench.py
+```
+
+### 语义缓存阈值实验
+
+为了在**命中率**和**正确率**之间取舍，用 13 组同义改写和 7 组难负例做了阈值对比实验（默认嵌入 Ollama 多语言模型 `bge-m3`，1024 维）：
+
+| 阈值 | 同义命中 | 误判 | 结论 |
+| --- | --- | --- | --- |
+| 0.95 | 6/13 | 0/7 | ✅ 零误判，安全阈值 |
+| 0.90 | 10/13 | 1/7 | ⚠️ 多命中 4 个，但把「如何导出对话？」误判为「如何导入对话？」（相似度 0.93） |
+
+**最终选择 0.95**：宁可少命中，也不能返回错误答案——缓存误判比不命中严重得多。
+
+> 历史记录：改用 bge-m3 之前使用的是英文模型 `all-MiniLM-L6-v2`，它在中文上区分度不足（语义无关的句子也会得到约 1.00 的相似度），当时 0.95 下仍有 2/7 误判、找不到零误判阈值。这正是改用多语言模型 `bge-m3` 的原因。
+
+**复现方式**：
+
+```bash
+python scripts/eval_semantic_cache.py
 ```
 
 ---
@@ -253,8 +278,9 @@ python scripts/eval_rag.py
 | `DEEPSEEK_API_KEY` | DeepSeek API 密钥（默认提供方） | 否（可用 Ollama 本地模型替代） |
 | `OPENAI_API_KEY` | OpenAI API 密钥（OpenAI 模型 / RAG 嵌入使用） | 否 |
 | `OPENAI_BASE_URL` | OpenAI 接口地址 | 否（默认 `https://api.openai.com/v1`） |
-| `OLLAMA_BASE_URL` | Ollama 本地服务地址 | 否（默认 `http://localhost:11434/v1`） |
-| `EMBEDDING_PROVIDER` | RAG 嵌入方式：`auto` / `openai` / `local` | 否（默认 `auto`） |
+| `OLLAMA_BASE_URL` | Ollama 本地服务地址（嵌入接口同样使用，自动兼容带/不带 `/v1`） | 否（默认 `http://localhost:11434/v1`） |
+| `EMBEDDING_PROVIDER` | RAG 嵌入方式：`auto` / `ollama` / `openai` / `local` | 否（默认 `auto`，优先 Ollama bge-m3） |
+| `OLLAMA_EMBEDDING_MODEL` | Ollama 嵌入模型名（多语言） | 否（默认 `bge-m3`，使用前需 `ollama pull bge-m3`） |
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥 | 否（未配置时网络搜索不可用） |
 | `PIXSERP_API_KEY` | pixserp 备用搜索 API 密钥 | 否（Tavily 失败时自动切换） |
 | `DATABASE_URL` | MySQL 连接串（SQLAlchemy 格式，含账号密码） | 否（默认本地开发值，见 `.env.example`） |
@@ -380,7 +406,8 @@ ma-ai-chat5201314/
 │   └── test_e2e_mysql.py  # MySQL 端到端测试（不可用时自动跳过）
 ├── scripts/               # 辅助脚本
 │   ├── bench.py           # 性能基准测试（延迟 / 缓存命中率）
-│   └── eval_rag.py        # RAG 检索效果评估
+│   ├── eval_rag.py        # RAG 检索效果评估
+│   └── eval_semantic_cache.py  # 语义缓存阈值实验（命中 / 误判对比）
 ├── .github/workflows/
 │   └── ci.yml             # CI：ruff 规范检查 + pytest 自动测试
 ├── resources/

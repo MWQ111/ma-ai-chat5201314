@@ -39,13 +39,23 @@ def test_make_key_invalidates_on_prompt_and_rag_version_change():
         cache_mod.RAG_VERSION = old_version
 
 
-def test_get_cache_degrades_without_redis():
-    """Redis 未启动时返回 None（首次可用性探测可能耗时 1-2 秒，属预期）"""
+def test_get_cache_degrades_without_redis(monkeypatch):
+    """Redis 不可用时返回 None。
+
+    显式把可用性探测 mock 为 False：不再依赖本机 Redis 的真实状态
+    （本机常驻 Redis 时，缓存里只要有同题或语义相近的条目就会误报失败）。
+    """
+    monkeypatch.setattr("core.cache.is_redis_available", lambda: False)
     assert get_cached_response("任意问题", model="deepseek-chat") is None
 
 
-def test_set_cache_degrades_silently():
-    """写入失败静默跳过，绝不抛异常"""
+def test_set_cache_degrades_silently(monkeypatch):
+    """Redis 不可用时写入静默跳过，绝不抛异常。
+
+    同样 mock 掉真实 Redis：否则本用例会真的写入用户缓存，污染线上数据
+    并让 test_get_cache_degrades_without_redis 因精确命中而失败。
+    """
+    monkeypatch.setattr("core.cache.is_redis_available", lambda: False)
     set_cached_response("任意问题", "回答", model="deepseek-chat")
 
 

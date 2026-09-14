@@ -70,13 +70,14 @@ st.logo(os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "g
 # ====================== 初始化与组装 ======================
 init_session_state(st.session_state)
 
-# ====================== 回调内 rerun 统一处理入口 ======================
-# Streamlit ≥1.37 把 on_click/on_change 回调内调用的 st.rerun() 视为 no-op
-# 并输出 "Calling st.rerun() within a callback is a no-op." 警告（本项目运行于
-# 1.57）。因此所有回调只负责修改状态并置位 _need_rerun 标记，真正触发重跑的
-# st.rerun() 统一收敛到本处执行：置位 → 顶层立即 rerun → 新一次运行 pop 掉标记。
-if st.session_state.pop("_need_rerun", False):
-    st.rerun()
+# ====================== 回调后的界面刷新 ======================
+# on_click/on_change 回调只改 session_state，不调用 st.rerun()：回调内调用会被
+# Streamlit（≥1.37）当作 no-op 并告警，而回调执行完毕后 Streamlit 本就会自动
+# 重跑一次脚本，界面随之刷新，无需额外触发。
+# ⚠️ 切勿在此处「顶层提前 st.rerun()」：那会在 render_sidebar() 之前中断脚本，
+# 使本轮尚未渲染的控件（如侧边栏「夜间模式」开关）其 session_state 被 Streamlit
+# 回收，下一次运行回落为 AppConfig.DEFAULT_DARK_MODE —— 表现为「浅色模式下删除
+# 对话后界面自动跳回夜间模式」。
 
 # 美化CSS：必须在所有页面元素渲染之前注入（紧跟 init_session_state），
 # 保证 AI 流式回答期间样式恒定（原因详见 ui/components.py 注释）。

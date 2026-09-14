@@ -219,10 +219,9 @@ def _on_tools_enabled_change() -> None:
 def _delete_conversation(idx: int) -> None:
     """删除指定索引的历史对话（删除按钮的 on_click 回调）
 
-    注意：Streamlit（≥1.37）中在 on_click 回调内调用 st.rerun() 会被当作
-    no-op 并输出警告。回调只做状态修改并置位 _need_rerun 标记，真正的
-    st.rerun() 统一由 app.py 顶层消费（详见 app.py 说明）。删除按钮被点击
-    后 Streamlit 本就会自动触发一次重跑，因此界面能立即刷新。
+    回调只修改 session_state，不调用 st.rerun()：回调内的 st.rerun() 会被
+    Streamlit（≥1.37）当作 no-op 并告警，而回调结束后 Streamlit 本就会自动
+    重跑一次脚本，界面随之刷新（详见 app.py「回调后的界面刷新」说明）。
     1. 删除后按被删位置修正 current_conversation_index，防止越界与错位：
        - 删除的是当前对话之前的条目 → 当前索引 -1（列表前移）
        - 删除的是当前对话本身 → 切换到相邻条目（优先后一个；
@@ -256,7 +255,6 @@ def _delete_conversation(idx: int) -> None:
 
     st.session_state._conv_deleted_name = removed.get("name", "")
     save_session_to_file(st.session_state)
-    st.session_state._need_rerun = True  # app.py 顶层消费后执行真正的 st.rerun()
 
 
 # ====================== 侧边栏渲染 ======================
@@ -330,7 +328,12 @@ def render_sidebar() -> None:
                     logger.error("RAG 状态获取失败：%s", e)
                     ready, status_msg, provider, doc_count = False, f"状态获取失败：{str(e)}", None, 0
                 if provider:
-                    st.caption(f"当前嵌入方式：{'OpenAI text-embedding-3-small' if provider == 'openai' else '本地模型（免密钥）'}")
+                    provider_labels = {
+                        "ollama": "Ollama bge-m3（多语言）",
+                        "openai": "OpenAI text-embedding-3-small",
+                        "local": "本地模型 all-MiniLM-L6-v2（免密钥）",
+                    }
+                    st.caption(f"当前嵌入方式：{provider_labels.get(provider, provider)}")
                 if status_msg:
                     st.caption(status_msg)
 
@@ -680,9 +683,8 @@ def render_sidebar() -> None:
                 with col_del:
                     # 仅保留删除按钮；仅剩一条对话时禁用（至少保留一条）。
                     # 删除逻辑放在 on_click 回调 _delete_conversation 中：
-                    # 回调里修改状态并置位 _need_rerun 标记，由 app.py 顶层
-                    # 统一执行 st.rerun()（回调内直接 rerun 会被 Streamlit
-                    # 当作 no-op 并警告）。
+                    # 回调只改状态、不调用 st.rerun()（回调内 rerun 是 no-op
+                    # 且会告警），界面由 Streamlit 回调后的自动重跑刷新。
                     del_disabled = len(st.session_state.conversations) <= 1
                     st.button(
                         "🗑️",

@@ -8,12 +8,14 @@ RAG（检索增强生成）模块
 - ChromaDB：本地持久化向量数据库（数据保存在项目根目录 ./chroma_db）
 
 嵌入模型（通过环境变量 EMBEDDING_PROVIDER 配置，默认 auto）：
+- ollama：使用 Ollama 的多语言模型 bge-m3（默认优先；需本地运行 Ollama 并已
+          ollama pull bge-m3，中文语义区分能力优于英文模型）
 - openai：使用 OpenAI 的 text-embedding-3-small（需设置 OPENAI_API_KEY，可选 OPENAI_BASE_URL）
-- local ：使用 ChromaDB 内置本地嵌入模型 ONNXMiniLM-L6-v2（免密钥、无需联网，首次使用自动下载模型）
-- auto  ：有 OPENAI_API_KEY 时用 openai，否则自动降级为 local
+- local ：使用 ChromaDB 内置本地嵌入模型 ONNXMiniLM-L6-v2（免密钥、无需联网）
+- auto  ：优先 ollama（可用时），否则有 OPENAI_API_KEY 用 openai，否则降级为 local
 
 注意：已存在的向量库必须沿用其创建时的嵌入方式（向量维度不同不能混用），
-模块会自动检测并沿用，若缺少对应密钥会给出明确错误提示。
+模块会自动检测并沿用；集合为空（无向量）时允许按新配置重建，不会丢数据。
 """
 
 import os
@@ -28,7 +30,12 @@ from langchain_core.documents import Document
 import chromadb
 from chromadb.utils import embedding_functions
 
-from core.cache import bump_rag_version
+from core.cache import (
+    OLLAMA_EMBEDDING_MODEL,
+    bump_rag_version,
+    ollama_base_url,
+    ollama_embeddings_available,
+)
 
 # ====================== 常量配置 ======================
 # 项目根目录（本模块位于 core/ 下，父目录即项目根目录）
@@ -47,7 +54,7 @@ CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
 # ====================== 模块级懒加载单例 ======================
 _client = None       # ChromaDB 持久化客户端（首次使用时创建）
 _collection = None   # 文档向量集合
-_provider = None     # 当前向量库使用的嵌入方式："openai" 或 "local"
+_provider = None     # 当前向量库使用的嵌入方式："ollama" / "openai" / "local"
 _status_msg = ""     # 状态提示信息（如自动降级提示、警告）
 
 
@@ -75,11 +82,26 @@ def _get_embedding_function(provider):
     """根据嵌入方式创建对应的嵌入函数对象
 
     Args:
-        provider: 嵌入方式，取值为 "openai" 或 "local"
+        provider: 嵌入方式，取值为 "ollama" / "openai" / "local"
 
     Returns:
         嵌入函数对象；local 方式返回 None（ChromaDB 会使用内置默认嵌入模型）
+
+    Raises:
+        RuntimeError: ollama 方式但 Ollama 嵌入不可用时抛出
     """
+    if provider == "ollama":
+        if not ollama_embeddings_available():
+            raise RuntimeError(
+                "Ollama 嵌入不可用（未安装 langchain-ollama / ollama，或服务未启动）。"
+                "请先启动 Ollama 并执行 ollama pull bge-m3，"
+                "或将 EMBEDDING_PROVIDER 设为 local 使用内置本地模型。"
+            )
+        # 用 ChromaDB 原生 OllamaEmbeddingFunction：它能被正确序列化进集合配置、
+        # 重启后自动重建；langchain 的 ChromaLangchainEmbeddingFunction 在
+        # chromadb 1.5.9 的 query 路径会抛 TypeError，故不采用
+        return embedding_functions.OllamaEmbeddingFunction(
+            url=ollama_base_url(), model_name=OLLAMA_EMBEDDING_MODEL)
     if provider == "openai":
         return embedding_functions.OpenAIEmbeddingFunction(
             api_key=os.environ.get("OPENAI_API_KEY", ""),
@@ -93,12 +115,14 @@ def _resolve_provider():
     """解析实际使用的嵌入方式
 
     规则：
-    1. 向量库已存在 → 必须沿用其创建时记录的嵌入方式（否则向量维度不匹配），
-       配置与之冲突时给出提示；openai 方式缺密钥时抛出明确错误。
-    2. 向量库不存在 → 按环境变量 EMBEDDING_PROVIDER 决定（auto 时优先 openai）。
+    1. 向量库已有数据（片段数 > 0）→ 必须沿用其创建时记录的嵌入方式
+       （否则向量维度不匹配），配置与之冲突时给出提示；
+       空集合不构成约束——按新配置重建即可，不会丢数据。
+    2. 向量库不存在或为空 → 按环境变量 EMBEDDING_PROVIDER 决定
+       （auto 时优先 Ollama bge-m3，其次 openai，最后 local）。
 
     Returns:
-        str: 实际使用的嵌入方式（"openai" 或 "local"）
+        str: 实际使用的嵌入方式（"ollama" / "openai" / "local"）
 
     Raises:
         RuntimeError: 已有向量库需要 OpenAI 密钥但未配置时抛出
@@ -106,11 +130,12 @@ def _resolve_provider():
     global _status_msg
     env_provider = os.environ.get("EMBEDDING_PROVIDER", "auto").strip().lower()
 
-    # 检查是否已有向量库，并读取其创建时使用的嵌入方式
+    # 检查向量库是否已有数据，并读取其创建时使用的嵌入方式
     existing_provider = None
     try:
         col = _get_client().get_collection(COLLECTION_NAME)
-        existing_provider = (col.metadata or {}).get("embedding_provider")
+        if col.count() > 0:  # 空集合不锁定嵌入方式
+            existing_provider = (col.metadata or {}).get("embedding_provider")
     except Exception:
         existing_provider = None  # 集合不存在，属于首次运行
 
@@ -120,12 +145,24 @@ def _resolve_provider():
         if existing_provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
             raise RuntimeError(
                 "向量库由 OpenAI 嵌入创建，但未设置 OPENAI_API_KEY 环境变量，无法加载。"
-                "请设置密钥后重启应用，或先「清空所有文档」再改用本地嵌入。"
+                "请设置密钥后重启应用，或先「清空所有文档」再改用其他嵌入。"
             )
         return existing_provider
 
-    # 首次运行：按配置决定嵌入方式
-    if env_provider == "openai" or (env_provider == "auto" and os.environ.get("OPENAI_API_KEY")):
+    # 首次运行 / 空向量库：按配置决定嵌入方式
+    if env_provider == "ollama":
+        if ollama_embeddings_available():
+            return "ollama"
+        _status_msg = "⚠️ Ollama 嵌入不可用，已自动降级为本地内置嵌入模型"
+        return "local"
+    if env_provider == "openai":
+        return "openai"
+    if env_provider == "local":
+        return "local"
+    # auto：优先 Ollama（多语言，中文效果最好），其次 OpenAI，最后本地
+    if ollama_embeddings_available():
+        return "ollama"
+    if os.environ.get("OPENAI_API_KEY"):
         return "openai"
     return "local"
 
@@ -139,7 +176,18 @@ def _get_collection():
     global _collection, _provider
     if _collection is None:
         _provider = _resolve_provider()
-        _collection = _get_client().get_or_create_collection(
+        client = _get_client()
+        # 空集合若嵌入方式与当前配置不一致，先删除再重建：
+        # get_or_create_collection 不会更新已有集合的 metadata，
+        # 不删除会导致嵌入方式永远停留在旧值（集合为空，删除不丢数据）
+        try:
+            existing = client.get_collection(COLLECTION_NAME)
+            existing_provider = (existing.metadata or {}).get("embedding_provider")
+            if existing.count() == 0 and existing_provider != _provider:
+                client.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass  # 集合不存在：直接走创建流程
+        _collection = client.get_or_create_collection(
             name=COLLECTION_NAME,
             embedding_function=_get_embedding_function(_provider),
             metadata={"embedding_provider": _provider, "hnsw:space": "cosine"},

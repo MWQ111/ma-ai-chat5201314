@@ -10,8 +10,10 @@ Redis 缓存模块
 两者任一变化，缓存键随之变化，旧缓存自然失效，无需手动清空。
 
 语义缓存（v2）：精确匹配未命中时，把问题转成向量与缓存中的历史问题
-做余弦相似度比较，意思相近的问题也能命中缓存，提升命中率（实测本地模型
-下同义改写相似度约 0.6~0.99、无关问题约 0.45，默认阈值 0.95 无安全误命中）。
+做余弦相似度比较，意思相近的问题也能命中缓存，提升命中率。
+默认阈值 0.95。默认嵌入为多语言模型 Ollama bge-m3，实测（13 组同义改写
++ 7 组难负例）0.95 零误判，详见 scripts/eval_semantic_cache.py；
+若回退到英文模型 all-MiniLM-L6-v2，中文区分度不足，0.95 下仍可能误判。
 回答与问题向量一起以 JSON 存入缓存值；嵌入不可用或调用失败时自动降级为
 纯精确匹配。
 
@@ -22,10 +24,12 @@ Redis 缓存模块
 - REDIS_PASSWORD：Redis 密码，默认无
 - REDIS_DB：Redis 数据库编号，默认 0
 - CACHE_TTL：缓存过期秒数，默认 3600（1 小时）
-- OPENAI_API_KEY：语义缓存嵌入源开关，配置后调用 OpenAI
-  text-embedding-3-small；未配置则用 ChromaDB 内置本地模型
-  ONNXMiniLM-L6-v2（离线、免密钥）。DeepSeek 未提供嵌入接口，
-  因此不使用 DEEPSEEK_API_KEY 做嵌入。
+- OLLAMA_BASE_URL：Ollama 服务地址，默认 http://localhost:11434（自动兼容带
+  不带 /v1 后缀两种写法）。语义缓存与 RAG 默认使用其多语言嵌入模型 bge-m3
+- OLLAMA_EMBEDDING_MODEL：Ollama 嵌入模型名，默认 bge-m3
+- OPENAI_API_KEY：回退嵌入源。Ollama 不可用时，配置了该变量则调用 OpenAI
+  text-embedding-3-small；否则用 ChromaDB 内置本地模型 ONNXMiniLM-L6-v2
+  （离线、免密钥）。DeepSeek 未提供嵌入接口，因此不使用 DEEPSEEK_API_KEY。
 
 启动 Redis（Docker，一行命令）：
     docker run -d --name redis -p 6379:6379 redis:7
@@ -52,6 +56,12 @@ try:
 except ImportError:
     REDIS_LIB_AVAILABLE = False
 
+try:
+    from langchain_ollama import OllamaEmbeddings
+    OLLAMA_EMBEDDING_AVAILABLE = True
+except ImportError:
+    OLLAMA_EMBEDDING_AVAILABLE = False
+
 logger = logging.getLogger("ai_chat.core.cache")
 
 # ====================== 常量配置 ======================
@@ -60,6 +70,10 @@ CACHE_TTL = int(os.environ.get("CACHE_TTL", 3600))         # 缓存过期秒数�
 CHECK_INTERVAL = 30                                        # 检查成功时的冷却时间（秒）
 FAIL_COOLDOWN_MAX = 1800                                   # 检查失败时冷却时间的上限（30 分钟）
 PING_DEADLINE = 1.5                                        # ping 硬超时（秒）：超过即判定不可用
+
+# Ollama 嵌入（多语言 bge-m3）：语义缓存与 RAG 共用的默认嵌入来源，
+# 中文语义区分能力优于原英文模型 all-MiniLM-L6-v2
+OLLAMA_EMBEDDING_MODEL = os.environ.get("OLLAMA_EMBEDDING_MODEL", "bge-m3")
 
 # ====================== 缓存键附加因子 ======================
 # 同一问题的回答不仅取决于问题本身，还取决于系统提示词与 RAG 知识库内容：
@@ -89,19 +103,116 @@ def bump_rag_version() -> None:
 # 见 core/config.py）的条目视为命中，返回其答案，显著提升命中率。
 #
 # 嵌入来源（与 RAG 一致，自动选择）：
-# - 配置了 OPENAI_API_KEY：调用 OpenAI text-embedding-3-small（在线）；
-# - 未配置：ChromaDB 内置本地模型 ONNXMiniLM-L6-v2（离线、免密钥，
-#   首次使用自动下载模型文件）。
+# - 默认：Ollama 多语言模型 bge-m3（需本地运行 Ollama 并已 ollama pull bge-m3）；
+# - Ollama 不可用（未安装 langchain-ollama / 服务连不上）：回退原方案——
+#   配置了 OPENAI_API_KEY 用 OpenAI text-embedding-3-small，否则用 ChromaDB
+#   内置本地模型 ONNXMiniLM-L6-v2（离线、免密钥，首次使用自动下载）。
 # 注意：DeepSeek 未提供嵌入接口，因此不使用 DEEPSEEK_API_KEY 做嵌入。
 # 嵌入调用失败时 _embedding_failed 置位，本次进程内不再重试，自动降级为
 # 纯精确匹配，原有缓存功能不受任何影响。
 SEMANTIC_ENABLED = True          # 语义缓存总开关（按需置 False 可完全关闭）
 _embedding_fn = None             # 嵌入函数懒加载单例
 _embedding_failed = False        # 嵌入失败标记（失败后本次进程内不再重试）
+_ollama_failed = False           # Ollama 不可用标记（失败一次后本次进程内退回原方案）
+
+
+def ollama_base_url() -> str:
+    """Ollama 服务地址：去掉可能存在的 /v1 后缀
+
+    OLLAMA_BASE_URL 在对话链路里是 OpenAI 兼容地址（.../v1），而嵌入接口需用
+    根地址，这里统一归一化，两种写法都能正确工作。供语义缓存与 RAG 共用。
+    """
+    url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").strip().rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url
+
+
+def get_ollama_embeddings():
+    """获取 Ollama 多语言嵌入对象（bge-m3）；不可用时返回 None
+
+    供语义缓存使用（RAG 走 ChromaDB 原生 OllamaEmbeddingFunction，
+    仅复用此模块的 base_url / 可用性探测）。
+    未安装 langchain-ollama，或本进程内已判定 Ollama 不可用时返回 None，
+    调用方应回退到原嵌入方案（OpenAI 或 ChromaDB 内置本地模型）。
+    """
+    if _ollama_failed or not OLLAMA_EMBEDDING_AVAILABLE:
+        return None
+    try:
+        return OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=ollama_base_url())
+    except Exception as e:
+        logger.warning("Ollama 嵌入对象创建失败：%s", e)
+        return None
+
+
+def ollama_embeddings_available() -> bool:
+    """探测 Ollama 嵌入是否真正可用（供 RAG 选择嵌入方式）
+
+    发一次最小嵌入请求验证连通性；失败即标记本进程内不再尝试 Ollama，
+    后续调用自动回退原嵌入方案。
+    """
+    global _ollama_failed
+    if _ollama_failed or not OLLAMA_EMBEDDING_AVAILABLE:
+        return False
+    try:
+        get_ollama_embeddings().embed_query("ping")
+        return True
+    except Exception as e:
+        logger.warning("Ollama 嵌入不可用（%s），回退原嵌入方案", e)
+        _ollama_failed = True
+        return False
+
+
+class _OllamaEmbeddingFn:
+    """把 langchain 的 OllamaEmbeddings 适配成「列表进、列表出」的可调用对象
+
+    与 ChromaDB EmbeddingFunction 的调用约定一致，便于 get_embedding 统一处理。
+    """
+
+    def __init__(self, ollama):
+        self._ollama = ollama
+
+    def __call__(self, texts):
+        return self._ollama.embed_documents(list(texts))
+
+
+def _build_embedding_fn():
+    """构建嵌入函数：优先 Ollama bge-m3（多语言，中文区分度好），
+
+    Ollama 不可用时回退原方案：配置了 OPENAI_API_KEY 用 OpenAI，
+    否则用 ChromaDB 内置本地模型 ONNXMiniLM-L6-v2。
+    """
+    ollama = get_ollama_embeddings()
+    if ollama is not None:
+        return _OllamaEmbeddingFn(ollama)
+    from chromadb.utils import embedding_functions
+    if os.getenv("OPENAI_API_KEY"):
+        return embedding_functions.OpenAIEmbeddingFunction(
+            api_key=os.environ["OPENAI_API_KEY"],
+            api_base=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            model_name="text-embedding-3-small",
+        )
+    return embedding_functions.DefaultEmbeddingFunction()
+
+
+def get_embedding_source() -> str:
+    """当前实际使用的嵌入来源描述（供界面 / 实验脚本展示）
+
+    注意：Ollama 是否真正可用只有在发起一次嵌入调用后才能确定，本函数按
+    当前已知状态给出最可能的来源；调用过 get_embedding 后结果才准确。
+    """
+    if not _ollama_failed and OLLAMA_EMBEDDING_AVAILABLE:
+        return f"Ollama {OLLAMA_EMBEDDING_MODEL}"
+    if os.getenv("OPENAI_API_KEY"):
+        return "OpenAI text-embedding-3-small"
+    return "本地 all-MiniLM-L6-v2"
 
 
 def get_embedding(text: str):
     """获取文本的向量表示
+
+    优先使用 Ollama bge-m3；Ollama 调用失败时本次进程内退回原嵌入方案再试一次；
+    两者都失败则返回 None（调用方降级为精确匹配）。
 
     Args:
         text: 问题文本
@@ -110,27 +221,26 @@ def get_embedding(text: str):
         list[float] 或 None: 问题向量；嵌入不可用或调用失败时返回 None
         （调用方应降级为精确匹配）
     """
-    global _embedding_fn, _embedding_failed
+    global _embedding_fn, _embedding_failed, _ollama_failed
     if not SEMANTIC_ENABLED or _embedding_failed:
         return None
-    try:
-        if _embedding_fn is None:
-            from chromadb.utils import embedding_functions
-            if os.getenv("OPENAI_API_KEY"):
-                _embedding_fn = embedding_functions.OpenAIEmbeddingFunction(
-                    api_key=os.environ["OPENAI_API_KEY"],
-                    api_base=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                    model_name="text-embedding-3-small",
-                )
-            else:
-                _embedding_fn = embedding_functions.DefaultEmbeddingFunction()
-        vector = _embedding_fn([text.strip()])[0]
-        return [float(v) for v in vector]
-    except Exception as e:
-        logger.warning("语义缓存嵌入失败，本次进程内降级为精确匹配：%s", e)
-        _embedding_failed = True
-        _embedding_fn = None
-        return None
+    for attempt in (0, 1):
+        try:
+            if _embedding_fn is None:
+                _embedding_fn = _build_embedding_fn()
+            vector = _embedding_fn([text.strip()])[0]
+            return [float(v) for v in vector]
+        except Exception as e:
+            _embedding_fn = None
+            # 第一次失败且此前在用 Ollama：标记其不可用，用回退方案再试一次
+            if attempt == 0 and not _ollama_failed and OLLAMA_EMBEDDING_AVAILABLE:
+                _ollama_failed = True
+                logger.warning("Ollama 嵌入调用失败（%s），回退原嵌入方案", e)
+                continue
+            logger.warning("语义缓存嵌入失败，本次进程内降级为精确匹配：%s", e)
+            _embedding_failed = True
+            return None
+    return None
 
 
 def _cosine_similarity(vec_a, vec_b) -> float:

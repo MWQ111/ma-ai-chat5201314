@@ -14,6 +14,10 @@ services:
   app:
     build: .
     image: ma-ai-chat:latest
+    # 只使用本地构建的镜像，绝不从远程仓库拉取
+    # （image 为本地标签名；无 pull_policy 时 docker compose pull 会尝试去
+    #  Docker Hub 拉取 ma-ai-chat 而被拒）
+    pull_policy: build
     container_name: ma-ai-chat-app
     ports:
       - "${PORT:-8501}:8501"
@@ -30,6 +34,7 @@ services:
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
       OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}"
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-auto}"
+      OLLAMA_EMBEDDING_MODEL: "${OLLAMA_EMBEDDING_MODEL:-bge-m3}"
       CACHE_TTL: "${CACHE_TTL:-3600}"
     volumes:
       # 会话数据挂载到宿主机，重启容器不丢失

@@ -17,9 +17,13 @@ venv/
 02.*.py
 03.*.py
 04.*.py
-05..py
+05.*.py
 
 # 其它
 .git/
 .gitignore
 *.md
+# 个人笔记和输出
+outputs/
+.workbuddy/
+backup/
