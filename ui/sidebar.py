@@ -111,6 +111,9 @@ def _render_provider_config() -> None:
     # 提供方切换：更新会话状态，并套用新提供方的默认模型与参数
     if new_provider != st.session_state.provider:
         st.session_state.provider = new_provider
+        # 清掉「API 配置」面板展开状态的会话缓存，让新提供方重新判定：
+        # 例如原提供方已配密钥（面板折叠），切到未配密钥的提供方时应自动展开引导
+        st.session_state.pop("_api_panel_expanded", None)
         cfg = get_provider_config(new_provider)
         st.session_state.current_model = cfg["default_model"]
         _apply_model_defaults(st.session_state.current_model)
@@ -189,6 +192,26 @@ def _render_legacy_api_config() -> None:
         save_session_to_file(st.session_state)
         st.success("配置保存成功！")
         st.rerun()
+
+
+def _api_key_configured() -> bool:
+    """判断当前提供方是否已具备可用密钥（决定「API 配置」面板的默认展开状态）
+
+    口径与 core.models.get_model_config 一致：界面填入的密钥优先，未填时回退到
+    该提供方的环境变量；本地提供方（api_key_env 为空，如 Ollama）不需要密钥，
+    一律视为已配置。
+    """
+    if not MODELS_AVAILABLE:
+        # 多模型模块不可用时的兜底面板只支持 DeepSeek，密钥存放在 api_key 键
+        return bool((st.session_state.get("api_key") or os.environ.get("DEEPSEEK_API_KEY", "")).strip())
+
+    provider = st.session_state.provider
+    env_name = get_provider_config(provider).get("api_key_env", "")
+    if not env_name:
+        return True
+    if (st.session_state.api_keys.get(provider) or "").strip():
+        return True
+    return bool(os.environ.get(env_name, "").strip())
 
 
 # ====================== 功能开关联动（缓存 / RAG / 工具调用） ======================
@@ -278,7 +301,13 @@ def render_sidebar() -> None:
         st.toggle("🌙 夜间模式", key="dark_mode")
 
         # API配置面板（提供方切换 + 动态配置字段 + 模型选择）
-        with st.expander("🔑 API 配置", expanded=True):
+        # 展开状态在会话内**只判定一次**并缓存：当前提供方尚未配置密钥时展开，
+        # 引导用户填写；已配置（含环境变量兜底）则折叠。
+        # 不能每次 rerun 重算 —— 否则用户刚填完 Key 触发重跑时面板会当场收起，
+        # 正想点的「保存配置」被藏起来；刷新页面（新会话）才会重新判定。
+        if "_api_panel_expanded" not in st.session_state:
+            st.session_state._api_panel_expanded = not _api_key_configured()
+        with st.expander("🔑 API 配置", expanded=st.session_state._api_panel_expanded):
             if MODELS_AVAILABLE:
                 _render_provider_config()
             else:

@@ -141,7 +141,11 @@ def test_message_length_limit():
 
 
 def test_new_conversation_persisted_with_version():
-    """新建对话触发原子写入：带版本号、无 .tmp 残留、新对话出现在文件中"""
+    """新建对话触发原子写入：带版本号、无 .tmp 残留、新对话出现在文件中。
+
+    自建自删：用例结束必须删掉自己新建的对话。conftest 的夹具只备份/还原
+    JSON 文件，还原不了 MySQL —— 若不清理，每跑一次就往真实库里留一条空对话。
+    """
     at = _load_app()
     before = 1
     before_names = set()
@@ -156,16 +160,30 @@ def test_new_conversation_persisted_with_version():
             break
     at.run()
     assert not at.exception
-    assert SESSION_FILE.exists()
-    with open(SESSION_FILE, encoding="utf-8") as f:
-        saved = json.load(f)
-    saved_conversations = saved.get("conversations", [])
-    assert saved.get("version") == 2
-    # 应用启动会把 MySQL 中已有的会话并入 session_state（文件可能滞后于库），
-    # 因此只断言「数量不少于 +1」且「出现了一个新对话」，不做精确计数
-    assert len(saved_conversations) >= before + 1
-    assert before_names < {c.get("name") for c in saved_conversations}
-    assert not Path(str(SESSION_FILE) + ".tmp").exists()
+    conv_id = at.session_state["conversations"][-1]["id"]
+
+    try:
+        assert SESSION_FILE.exists()
+        with open(SESSION_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        saved_conversations = saved.get("conversations", [])
+        assert saved.get("version") == 2
+        # 应用启动会把 MySQL 中已有的会话并入 session_state（文件可能滞后于库），
+        # 因此只断言「数量不少于 +1」且「出现了一个新对话」，不做精确计数
+        assert len(saved_conversations) >= before + 1
+        assert before_names < {c.get("name") for c in saved_conversations}
+        assert not Path(str(SESSION_FILE) + ".tmp").exists()
+    finally:
+        # 清理：删除本用例新建的对话。走应用自身的删除回调，它会同时清掉
+        # MySQL 行（delete_conversation_from_db）与 JSON 备份（save_session_to_file）
+        idx = next(
+            (i for i, c in enumerate(at.session_state["conversations"])
+             if c.get("id") == conv_id),
+            None,
+        )
+        if idx is not None:
+            at.button(key=f"del_conv_{idx}").click()
+            at.run()
 
 
 def test_corrupted_session_file_degrades():
