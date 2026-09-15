@@ -241,18 +241,22 @@ def init_session_state(session_state) -> None:
         )
 
     if "conversation_id" not in session_state:
-        session_state.conversation_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 含微秒：秒级精度下「默认对话」与「➕ 新建」若落在同一秒会撞 id，
+        # 而 id 会被用于反查对话（JSON 降级模式下默认对话的 id 也是时间戳）
+        session_state.conversation_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
     if "conversations" not in session_state:
         if convs_valid:
             session_state.conversations = cache_convs
         else:
-            # 对话列表为空或损坏：自动重建默认对话结构
+            # 对话列表为空或损坏：自动重建默认对话结构。
+            # id 带微秒只为保证唯一性；名字是给用户看的，用秒级时间戳即可
+            _now = datetime.now()
             session_state.conversations = [
                 {
                     "id": session_state.conversation_id,
-                    "name": f"对话 {session_state.conversation_id}",
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "name": f"对话 {_now.strftime('%Y%m%d_%H%M%S')}",
+                    "created_at": _now.strftime("%Y-%m-%d %H:%M:%S"),
                     "messages": []
                 }
             ]

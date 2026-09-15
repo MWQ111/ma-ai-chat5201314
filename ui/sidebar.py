@@ -574,11 +574,13 @@ def render_sidebar() -> None:
                 else:
                     try:
                         import_data = json.load(upload_file)
-                        new_conv_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        # id 带微秒保证唯一；名字给用户看，用秒级时间戳即可
+                        _now = datetime.now()
+                        new_conv_id = _now.strftime("%Y%m%d_%H%M%S_%f")
                         new_conv = {
                             "id": new_conv_id,
-                            "name": f"导入对话_{new_conv_id}",
-                            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "name": f"导入对话_{_now.strftime('%Y%m%d_%H%M%S')}",
+                            "created_at": _now.strftime("%Y-%m-%d %H:%M:%S"),
                             "messages": import_data.get("messages", [])
                         }
                         st.session_state.conversations.append(new_conv)
@@ -598,11 +600,14 @@ def render_sidebar() -> None:
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("➕ 新建", use_container_width=True):
-                new_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # id 带微秒：秒级精度下同一秒内连续新建会撞 id（id 用于反查/拼文件名）；
+                # 名字给用户看，用秒级时间戳即可
+                _now = datetime.now()
+                new_id = _now.strftime("%Y%m%d_%H%M%S_%f")
                 new_conv = {
                     "id": new_id,
-                    "name": f"对话_{new_id}",
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "name": f"对话_{_now.strftime('%Y%m%d_%H%M%S')}",
+                    "created_at": _now.strftime("%Y-%m-%d %H:%M:%S"),
                     "messages": []
                 }
                 st.session_state.conversations.append(new_conv)
@@ -632,7 +637,8 @@ def render_sidebar() -> None:
                 # 随后 save_session_to_file 会把新的默认对话同步回数据库
                 clear_all_conversations_from_db()
                 st.session_state.conversations = [{
-                    "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    # 含微秒：与其它 id 生成点保持同一格式，避免同秒撞 id
+                    "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
                     "name": "默认对话",
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "messages": []
