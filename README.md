@@ -98,7 +98,7 @@ flowchart TB
 | pytest / ruff | 测试与代码规范 | GitHub Actions 自动执行 |
 | Docker · docker-compose | 部署 | 一键编排 app + Redis + ChromaDB |
 
-> 说明：`requirements.txt` 锁定对话主链路依赖；REST API 与 MySQL 存储依赖 Flask / SQLAlchemy / PyMySQL，首次使用 API 或数据库前请执行 `pip install flask sqlalchemy pymysql`（见「快速启动」）。
+> 说明：上表依赖（**含 REST API 的 Flask 与 MySQL 存储的 SQLAlchemy / PyMySQL**）全部锁定在 `requirements.txt` 中，`pip install -r requirements.txt` 一次装全即可（见「快速启动」）。
 
 ---
 
@@ -170,21 +170,18 @@ python -m venv .venv
 # macOS / Linux:
 source .venv/bin/activate
 
-# 3. 安装依赖
+# 3. 安装依赖（含 REST API 的 Flask 与 MySQL 存储的 SQLAlchemy / PyMySQL，一次装全）
 pip install -r requirements.txt
 
-# 4.（可选）使用 REST API 或 MySQL 存储时补充安装：
-pip install flask sqlalchemy pymysql
-
-# 5. 配置环境变量
+# 4. 配置环境变量
 cp .env.example .env
 # 编辑 .env，至少填入 DEEPSEEK_API_KEY（使用 Ollama 本地模型可跳过）
 
-# 6.（可选）配置 MySQL：在 .env 中设置 DATABASE_URL（见 .env.example）
+# 5.（可选）配置 MySQL：在 .env 中设置 DATABASE_URL（见 .env.example）
 #    并创建数据库 ma_ai_chat（应用启动时自动建表，无需手动建表）；
 #    未配置/连不上时自动回退本地 JSON，不影响启动
 
-# 7.（可选）启动 Redis——不启动也能用，只是缓存功能自动降级
+# 6.（可选）启动 Redis——不启动也能用，只是缓存功能自动降级
 docker run -d --name redis -p 6379:6379 redis:7-alpine --appendonly yes
 # 或者只启动 compose 里的 Redis 服务：
 # docker compose up -d redis

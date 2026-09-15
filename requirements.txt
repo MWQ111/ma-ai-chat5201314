@@ -1,20 +1,32 @@
-# ===== 核心依赖（版本为实测通过的组合）=====
+# ===== Core =====
 streamlit==1.57.0
 openai==3.6.0
 python-dotenv==1.2.3
 
-# ===== RAG（文档加载/切分/向量库）=====
+# ===== REST API (Flask entry point in app_api.py) =====
+# tests/test_api.py imports app_api, so Flask is needed when CI collects tests
+Flask==3.1.3
+
+# ===== MySQL persistence (core/db.py) =====
+# SQLAlchemy is the ORM (top-level import in core/db.py); PyMySQL is its MySQL driver.
+# core/db.py runs create_engine("mysql+pymysql://...") at module level, which loads the
+# driver right away -- if either one is missing, importing core.db raises ModuleNotFoundError.
+SQLAlchemy==2.0.52
+PyMySQL==1.2.0
+
+# ===== RAG (document loading / splitting / vector store) =====
 chromadb==1.5.9
-langchain==1.3.15
 langchain-community==0.4.2
+langchain-core==1.6.1
 langchain-text-splitters==1.1.2
 langchain-ollama==1.1.0
 pypdf==6.16.1
 
-# ===== 工具调用 / 缓存 =====
+# ===== Tools / cache =====
 tavily-python==0.8.0
+requests==2.34.2
 redis==8.1.0
 
-# ===== Agent（LangGraph：规划 / 反思 / 自主结束）=====
+# ===== Agent (LangGraph: plan / reflect / finish) =====
 langgraph==1.2.11
 langchain-openai==1.6.0

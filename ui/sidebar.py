@@ -346,7 +346,7 @@ def render_sidebar() -> None:
             if not RAG_AVAILABLE:
                 st.error(
                     "⚠️ RAG 依赖未安装，请执行：\n```\n"
-                    "pip install langchain langchain-community "
+                    "pip install langchain-community "
                     "langchain-text-splitters chromadb pypdf\n```"
                 )
             else:
