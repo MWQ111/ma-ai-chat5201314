@@ -425,15 +425,41 @@ ma-ai-chat5201314/
 
 ## 📸 效果展示
 
-> 截图待补充，放置于 `docs/screenshots/` 后替换以下占位。
+### 主对话界面
 
-| 主对话界面 | Agent 模式（规划 / 反思过程） | 设置面板（模型 / 工具 / 缓存） |
-| --- | --- | --- |
-| [待添加] | [待添加] | [待添加] |
+![主对话界面](docs/screenshots/01-chat-main.png)
 
-| RAG 文档问答（含参考来源） | REST API 流式返回 | 深色模式 |
-| --- | --- | --- |
-| [待添加] | [待添加] | [待添加] |
+支持多模型切换、流式输出、会话管理；AI 回复下方提供一键复制。
+
+### Agent 模式（规划 / 反思过程）
+
+![Agent模式](docs/screenshots/02-agent-flow.png)
+
+Agent 自主规划步骤、调用工具、反思结果、决定何时结束。
+
+### 设置面板（模型 / 工具 / 缓存）
+
+![设置面板](docs/screenshots/03-settings.png)
+
+侧边栏集成 API 配置、RAG 文档管理、工具调用开关、Redis 缓存设置。
+
+### RAG 文档问答（含参考来源）
+
+![RAG问答](docs/screenshots/04-rag-sources.png)
+
+上传 PDF/TXT/Markdown 后，AI 基于检索到的片段回答，附来源与相似度。
+
+### 浅色模式
+
+![浅色模式](docs/screenshots/05-light-mode.png)
+
+深色/浅色两种主题一键切换，所有控件跟随应用内开关。
+
+### REST API 返回
+
+![API](docs/screenshots/06-api.png)
+
+提供 9 个标准化接口，含可取消的 SSE 流式输出。
 
 ---
 
