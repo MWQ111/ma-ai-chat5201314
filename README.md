@@ -20,7 +20,7 @@
 - **双入口**：Streamlit 图形界面 + Flask REST API（含可取消的流式接口）；
 - **Docker 一键部署**：docker-compose 编排应用 + Redis + ChromaDB。
 
-**工程理念**：贯穿全局的「优雅降级」——RAG、工具、缓存、Agent、MySQL 任一模块缺失或异常，应用照常运行。配套 51 个自动化测试与 GitHub Actions CI。
+**工程理念**：贯穿全局的「优雅降级」——RAG、工具、缓存、Agent、MySQL 任一模块缺失或异常，应用照常运行。配套 83 个自动化测试与 GitHub Actions CI。
 
 ---
 
@@ -248,7 +248,23 @@ python scripts/eval_semantic_cache.py
 
 ## 🧪 测试
 
-项目包含 **51 个自动化测试**，覆盖单元测试、Streamlit 集成测试（`AppTest`）和 MySQL 端到端测试。
+项目包含 **83 个自动化测试**，覆盖单元测试、Streamlit 集成测试（`AppTest`）和 MySQL 端到端测试。
+
+**测试分布**：
+
+| 测试文件 | 用例数 | 覆盖内容 |
+|----------|--------|----------|
+| `test_tools.py` | 14 | AST 计算、时间工具、工具定义 |
+| `test_api.py` | 31 | 9 个 REST 接口的正常/异常返回（含健康检查路由共 11 个） |
+| `test_app.py` | 7 | Streamlit 界面渲染、搜索过滤、回归测试 |
+| `test_cache.py` | 8 | 缓存键生成、语义相似度、降级 |
+| `test_agent.py` | 5 | Agent 规划/执行/反思流程 |
+| `test_models.py` | 11 | 多模型配置解析 |
+| `test_text_utils.py` | 6 | Token 估算 |
+| `test_e2e_mysql.py` | 1 | MySQL 端到端读写 |
+| **合计** | **83** | |
+
+> 测试覆盖单元逻辑、API 接口、Streamlit 集成和 MySQL 端到端。API 测试用 mock 隔离外部依赖，CI 环境也能跑；MySQL 端到端测试检测到数据库不可用时自动 skip。
 
 **复现方式**：
 
@@ -392,7 +408,7 @@ ma-ai-chat5201314/
 │   ├── sidebar.py         # 侧边栏：API 配置 / 高级参数 / RAG 文档 / 工具与缓存 / 对话管理
 │   ├── chat.py            # 聊天界面：消息渲染 / 复制按钮 / 用户消息处理流程
 │   └── components.py      # 通用组件：全局主题 CSS 注入、toast 轻提示
-├── tests/                 # pytest 测试套件（51 个：单元 + Streamlit AppTest 集成 + MySQL E2E）
+├── tests/                 # pytest 测试套件（83 个：单元 + Streamlit AppTest 集成 + MySQL E2E）
 │   ├── conftest.py        # 全局夹具：sys.path 修正 / .env 加载 / 会话文件备份恢复
 │   ├── test_models.py     # 多模型提供方配置单元测试
 │   ├── test_tools.py      # Function Calling 工具单元测试
@@ -400,6 +416,7 @@ ma-ai-chat5201314/
 │   ├── test_cache.py      # Redis 缓存测试
 │   ├── test_agent.py      # LangGraph Agent 测试
 │   ├── test_app.py        # Streamlit AppTest 集成测试
+│   ├── test_api.py        # Flask REST API 测试（接口正常 / 异常返回）
 │   └── test_e2e_mysql.py  # MySQL 端到端测试（不可用时自动跳过）
 ├── scripts/               # 辅助脚本
 │   ├── bench.py           # 性能基准测试（延迟 / 缓存命中率）
@@ -459,7 +476,7 @@ Agent 自主规划步骤、调用工具、反思结果、决定何时结束。
 
 ![API](docs/screenshots/06-api.png)
 
-提供 9 个标准化接口，含可取消的 SSE 流式输出。
+提供 9 个标准化业务接口（含健康检查路由共 11 个），含可取消的 SSE 流式输出。
 
 ---
 
