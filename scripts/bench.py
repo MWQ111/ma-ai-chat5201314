@@ -5,6 +5,8 @@
 - 不依赖 Redis：用进程内本地缓存模拟缓存层（与 core.cache 相同的 get/set 语义）；
 - 40% 的请求会重复最近问过的问题（模拟真实场景中的追问/重复提问），
   其余为全新问题，命中率由该比例决定；
+- 跑两组对照：开缓存 vs 关缓存（同一随机种子，关缓存每次都模拟完整生成），
+  用「提升 = 关缓存 - 开缓存」量化缓存层拉低了多少延迟；
 - 固定随机种子，结果可复现。
 
 用法：
@@ -14,15 +16,18 @@
 输出示例：
     性能基准（100 次请求）：
 
-    P50 延迟：1.05s
-    P95 延迟：2.38s
-    缓存命中率：40.0%
+    指标          开缓存      关缓存      提升
+    --------------------------------------------------
+    P50 延迟      0.90s       1.66s       0.76s
+    P95 延迟      2.42s       2.43s       0.01s
+    命中率        44.0%       0.0%
 """
 
 import math
 import random
 import sys
 import time
+import unicodedata
 
 N_REQUESTS = 100                        # 默认请求数
 GENERATION_DELAY_RANGE = (0.8, 2.5)     # 模拟一次真实 AI 生成的耗时区间（秒）
@@ -65,8 +70,17 @@ def percentile(sorted_values, p):
     return sorted_values[idx]
 
 
-def run_benchmark(n_requests):
-    """执行基准，返回 (升序延迟列表, 缓存命中次数)"""
+def _pad(text, width):
+    """按终端显示宽度补齐到 width 列：中文字符占 2 列，直接用 str.ljust 会与表头错位"""
+    display = sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+    return text + " " * max(0, width - display)
+
+
+def run_benchmark(n_requests, use_cache=True):
+    """执行基准，返回 (升序延迟列表, 缓存命中次数)
+
+    use_cache=False 时强制不走缓存（对照组），每次请求都模拟一次完整生成。
+    """
     cache = MockCache()
     recent = []
     latencies = []
@@ -84,7 +98,10 @@ def run_benchmark(n_requests):
                 recent.pop(0)
 
         t0 = time.perf_counter()
-        answer = cache.get(question)
+        if use_cache:
+            answer = cache.get(question)
+        else:
+            answer = None          # 关缓存：强制不走缓存
         if answer is None:
             answer = mock_generate(question)  # 未命中：模拟一次完整生成
             cache.set(question, answer)
@@ -108,18 +125,38 @@ def main() -> int:
             return 2
 
     random.seed(RANDOM_SEED)
-    latencies, hits = run_benchmark(n)
-    hit_rate = hits / n if n else 0.0
+    lat_with, hits_with = run_benchmark(n, use_cache=True)
+    hit_rate_with = hits_with / n if n else 0.0
+
+    random.seed(RANDOM_SEED)          # 重置种子，保证两组输入完全一样
+    lat_without, hits_without = run_benchmark(n, use_cache=False)
+    hit_rate_without = hits_without / n if n else 0.0
+
+    p50_with = percentile(lat_with, 50)
+    p95_with = percentile(lat_with, 95)
+    p50_without = percentile(lat_without, 50)
+    p95_without = percentile(lat_without, 95)
 
     print(f"性能基准（{n} 次请求）：")
     print()
-    print(f"P50 延迟：{percentile(latencies, 50):.2f}s")
-    print(f"P95 延迟：{percentile(latencies, 95):.2f}s")
-    print(f"缓存命中率：{hit_rate:.1%}")
+    print(_pad("指标", 14) + _pad("开缓存", 12) + _pad("关缓存", 12) + _pad("提升", 12))
+    print("-" * 50)
+    print(_pad("P50 延迟", 14)
+          + _pad(f"{p50_with:.2f}s", 12)
+          + _pad(f"{p50_without:.2f}s", 12)
+          + _pad(f"{p50_without - p50_with:.2f}s", 12))
+    print(_pad("P95 延迟", 14)
+          + _pad(f"{p95_with:.2f}s", 12)
+          + _pad(f"{p95_without:.2f}s", 12)
+          + _pad(f"{p95_without - p95_with:.2f}s", 12))
+    print(_pad("命中率", 14)
+          + _pad(f"{hit_rate_with:.1%}", 12)
+          + _pad(f"{hit_rate_without:.1%}", 12))
     print()
     print(f"（方法：本地 mock 缓存 + 模拟生成耗时 "
           f"{GENERATION_DELAY_RANGE[0]}~{GENERATION_DELAY_RANGE[1]}s，")
-    print(f" 未调用真实 AI / Redis；缓存命中 {hits} 次，未命中 {n - hits} 次）")
+    print(f" 未调用真实 AI / Redis；开缓存组命中 {hits_with} 次，未命中 {n - hits_with} 次；")
+    print(" 对照组：同一随机种子下，关缓存强制不走缓存，每次都模拟完整生成。）")
     return 0
 
 
