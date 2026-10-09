@@ -2,6 +2,7 @@ import json
 import os
 import threading
 import uuid
+import time
 
 # 先加载 .env 再导入 core：core/db.py 在导入时读取 DATABASE_URL 环境变量，
 # 与 app.py 的加载逻辑保持一致（文件不存在时静默跳过）
@@ -68,6 +69,40 @@ def chat():
         "response": full_response,
         "user_message": user_message
     })
+@app.route("/v1/chat/completions", methods=["POST"])
+def openai_compat():
+    """OpenAI 兼容端点：通用工具（评测机、SDK、压测器）无需适配即可对话。
+    内部复用同一套生成逻辑，只做"方言翻译"：收 OpenAI 请求形状，
+    调 call_ai_api_simple，回 OpenAI 响应形状。
+    """
+    data = request.get_json(silent=True) or {}
+    messages = data.get("messages") or []
+    if not messages:
+        return jsonify({"error": {"message": "messages 字段不能为空",
+                                  "type": "invalid_request_error"}}), 400
+
+    full_response = call_ai_api_simple(messages)
+
+    # token 用字符数粗估（诚实口径：非精确分词，生产接 tiktoken）
+    prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    return jsonify({
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": data.get("model", "ma-ai-chat"),
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": full_response},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": prompt_chars,
+            "completion_tokens": len(full_response),
+            "total_tokens": prompt_chars + len(full_response),
+        },
+    })
+
+
 
 @app.route("/ask", methods=["GET"])
 def ask():
