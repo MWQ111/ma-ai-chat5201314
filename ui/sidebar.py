@@ -757,3 +757,16 @@ def render_sidebar() -> None:
             c3.metric("用户 Token", user_tokens)
             c4.metric("AI Token", ai_tokens)
             st.metric("对话总数", len(st.session_state.conversations))
+
+        # 开关持久化：三个开关（缓存 / RAG / 工具调用）是用户设置，不应随 st.rerun()
+        # 中断（未渲染控件的键被 Streamlit 回收）而丢失。在 render_sidebar 末尾统一比对
+        # 「当前值」与「上次落盘值」，不一致才写盘；不在 on_change 回调里落盘，
+        # 因为回调先于值更新执行、会读到旧值。
+        _switches_now = (
+            st.session_state.cache_enabled,
+            st.session_state.rag_enabled,
+            st.session_state.tools_enabled,
+        )
+        if st.session_state.get("_persisted_switches") != _switches_now:
+            save_session_to_file(st.session_state)
+            st.session_state._persisted_switches = _switches_now

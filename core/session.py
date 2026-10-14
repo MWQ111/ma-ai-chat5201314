@@ -118,6 +118,9 @@ def _save_session_to_file(session_state) -> None:
             "current_model": session_state.get("current_model", "deepseek-chat"),
             "agent_mode_enabled": session_state.get("agent_mode_enabled", False),
             "agent_max_steps": session_state.get("agent_max_steps", 5),
+            "cache_enabled": session_state.get("cache_enabled", True),
+            "rag_enabled": session_state.get("rag_enabled", True),
+            "tools_enabled": session_state.get("tools_enabled", True),
         }
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -271,14 +274,25 @@ def init_session_state(session_state) -> None:
     if "max_context_msg" not in session_state:
         session_state.max_context_msg = AppConfig.MAX_CONTEXT_MSGS
 
-    if "rag_enabled" not in session_state:
-        session_state.rag_enabled = True
-
-    if "tools_enabled" not in session_state:
-        session_state.tools_enabled = True
-
-    if "cache_enabled" not in session_state:
-        session_state.cache_enabled = True
+    # ===== 功能开关（缓存 / RAG / 工具调用）：用户设置，需持久化 =====
+    # 这三个键会在 st.rerun() 中断脚本时被 Streamlit 回收（未渲染控件的键被删除），
+    # 若回落硬编码默认值 True，会出现「关缓存 + 开 RAG + 上传文档」后缓存被重置为开、
+    # RAG 被联动兜底关掉。故键缺失时从持久化存储读回，而非直接默认。
+    # 注意：cache_data 仅在会话首次初始化（conversations 未注入）时加载，
+    # 后续 rerun 中被回收时 cache_data 为 None，需单独读一次 JSON 备份；
+    # 正常 rerun 三个键都在，不会走到这里，无额外 I/O。
+    if ("cache_enabled" not in session_state
+            or "rag_enabled" not in session_state
+            or "tools_enabled" not in session_state):
+        switch_src = cache_data if cache_data else load_session_from_file()
+        if not isinstance(switch_src, dict):
+            switch_src = {}
+        if "cache_enabled" not in session_state:
+            session_state.cache_enabled = bool(switch_src.get("cache_enabled", True))
+        if "rag_enabled" not in session_state:
+            session_state.rag_enabled = bool(switch_src.get("rag_enabled", True))
+        if "tools_enabled" not in session_state:
+            session_state.tools_enabled = bool(switch_src.get("tools_enabled", True))
 
     # ===== Agent 模式（LangGraph 规划 + 反思 + 自主结束，需先开启工具调用） =====
     if "agent_mode_enabled" not in session_state:
